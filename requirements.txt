@@ -1,0 +1,10 @@
+geopandas
+contextily
+scikit-learn
+mapclassify
+folium
+flask
+pandas
+openpyxl
+flask-cors
+
