@@ -45,7 +45,7 @@ class DatasetManager:
 
         try:
             df = pd.read_excel(excel_path, sheet_name="2024", skiprows=6, header=None)
-            
+
             # Indice 5: Cod. Istat
             # Indice 18: Presenze / Totale esercizi / Non residenti
             df_filtered = df[[5, 18]].copy()
@@ -82,6 +82,54 @@ class DatasetManager:
 
         return result
     
+    def add_comuni_characteristics(self, dataset: pd.DataFrame, csv_path: str, encoding: str = "utf-8") -> pd.DataFrame:
+        """
+        Legge il file CSV con le caratteristiche dei comuni (ripartizioni ISTAT),
+        estrae codice comune, comune isolano, comune litoraneo e zona altimetrica,
+        ed esegue il join con il dataset dei comuni su id_comune / Codice Comune (alfanumerico).
+        """
+        print(f"Lettura del file: {csv_path}...")
+
+        try:
+            df = pd.read_csv(csv_path, sep=";", encoding=encoding, dtype=str)
+        except Exception as e:
+            raise ValueError(f"Si è verificato un errore durante la lettura del file CSV: {e}")
+
+        required_cols = [
+            "Codice Comune (alfanumerico)",
+            "Comune isolano",
+            "Comune litoraneo",
+            "Zona altimetrica",
+        ]
+        missing = [c for c in required_cols if c not in df.columns]
+        if missing:
+            raise ValueError(f"Colonne mancanti nel CSV: {missing}")
+
+        df_filtered = df[required_cols].copy()
+        df_filtered.columns = [
+            "cod_comune_alfanumerico",
+            "comune_isolano",
+            "comune_litoraneo",
+            "zona_altimetrica",
+        ]
+
+        df_filtered["cod_comune_alfanumerico"] = (
+            df_filtered["cod_comune_alfanumerico"].astype(str).str.strip().str.zfill(6)
+        )
+
+        # normalizzazione chiave di join lato dataset comuni
+        dataset = dataset.copy()
+        dataset["id_comune"] = dataset["id_comune"].astype(str).str.zfill(6)
+
+        result = dataset.merge(
+            df_filtered,
+            left_on="id_comune",
+            right_on="cod_comune_alfanumerico",
+            how="left"
+        ).drop(columns=["cod_comune_alfanumerico"])
+
+        return result
+        
     def save_to_csv(self, df: pd.DataFrame, output_path: str, index: bool = False, encoding: str = "utf-8") -> None:
         """
         Salva il dataset in CSV.
