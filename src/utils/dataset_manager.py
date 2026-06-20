@@ -47,14 +47,14 @@ class DatasetManager:
             df = pd.read_excel(excel_path, sheet_name="2024", skiprows=6, header=None)
 
             # Indice 5: Cod. Istat
-            # Indice 18: Presenze / Totale esercizi / Non residenti
-            df_filtered = df[[5, 18]].copy()
-            df_filtered.columns = ["cod_istat", "presenze_non_residenti"]
+            # Indice 19: Presenze / Totale esercizi / Totali
+            df_filtered = df[[5, 19]].copy()
+            df_filtered.columns = ["cod_istat", "presenze_totali"]
 
             df_filtered = df_filtered.dropna(subset=["cod_istat"])
 
-            df_filtered["presenze_non_residenti"] = (
-                pd.to_numeric(df_filtered["presenze_non_residenti"], errors="coerce")
+            df_filtered["presenze_totali"] = (
+                pd.to_numeric(df_filtered["presenze_totali"], errors="coerce")
                 .fillna(0)
                 .round(0)
                 .astype(int)
@@ -74,15 +74,17 @@ class DatasetManager:
         dataset["id_comune"] = dataset["id_comune"].astype(str).str.zfill(6)
 
         result = dataset.merge(
-            df_filtered[["cod_istat", "presenze_non_residenti"]],
+            df_filtered[["cod_istat", "presenze_totali"]],
             left_on="id_comune",
             right_on="cod_istat",
             how="left"
         ).drop(columns=["cod_istat"])
 
+        result["presenze_totali"] = result["presenze_totali"].astype("Int64")
+
         return result
     
-    def add_comuni_characteristics(self, dataset: pd.DataFrame, csv_path: str, encoding: str = "utf-8") -> pd.DataFrame:
+    def add_geological_characteristics(self, dataset: pd.DataFrame, csv_path: str, encoding: str = "utf-8") -> pd.DataFrame:
         """
         Legge il file CSV con le caratteristiche dei comuni (ripartizioni ISTAT),
         estrae codice comune, comune isolano, comune litoraneo e zona altimetrica,
