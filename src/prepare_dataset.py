@@ -18,6 +18,11 @@ def create_dataset():
         "data/input/Comuni - Caratteristiche del territorio Data Indagine 31-12-2024 Stampa 20062026171759.csv"
     )
 
+    dataset = dataset_manager.add_cultural_attractions(
+        dataset,
+        "data/input/Attrazioni_culturali.csv"
+    )
+
     dataset_manager.save_to_csv(
         dataset,
         "data/tourism_final_dataset.csv",

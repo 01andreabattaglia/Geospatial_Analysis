@@ -1,6 +1,13 @@
 from dbfread import DBF
 import pandas as pd
 
+from .cultural_attractions import (
+    ECCEZIONI_COMUNI,
+    MACRO_COLS,
+    normalize_name,
+    load_cultural_attractions_pivot,
+)
+
 
 class DatasetManager:
     def __init__(self, encoding="utf-8"):
@@ -129,6 +136,85 @@ class DatasetManager:
             right_on="cod_comune_alfanumerico",
             how="left"
         ).drop(columns=["cod_comune_alfanumerico"])
+
+        return result
+    
+    def add_cultural_attractions(self, dataset: pd.DataFrame, csv_path: str) -> pd.DataFrame:
+        """
+        Legge il file CSV delle attrazioni turistiche, mappa le tipologie
+        in macro-categorie ed esegue il join con il dataset dei comuni
+        su nome_comune / comune, aggiungendo il conteggio per ciascuna
+        macro-categoria. Le tipologie riferite a enti/istituzioni/amministrazione
+        vengono escluse.
+        """
+        print(f"Lettura del file: {csv_path}...")
+
+        try:
+            pivot = load_cultural_attractions_pivot(csv_path)
+
+        except Exception as e:
+            raise ValueError(
+                f"Si è verificato un errore durante "
+                f"l'estrazione del file CSV: {e}"
+            )
+
+        dataset = dataset.copy()
+
+        dataset["nome_comune"] = (
+            dataset["nome_comune"]
+            .astype(str)
+            .str.strip()
+        )
+
+        dataset["_match_key"] = (
+            dataset["nome_comune"]
+            .apply(normalize_name)
+        )
+
+        pivot["_match_key"] = (
+            pivot["comune"]
+            .apply(normalize_name)
+        )
+
+        # applica le eccezioni sui nomi provenienti dal CSV
+        pivot["_match_key"] = (
+            pivot["_match_key"]
+            .replace(ECCEZIONI_COMUNI)
+        )
+
+        chiavi_dataset = set(dataset["_match_key"])
+
+        non_trovati = (
+            pivot.loc[
+                ~pivot["_match_key"].isin(chiavi_dataset),
+                "comune",
+            ]
+            .sort_values()
+            .tolist()
+        )
+
+        if non_trovati:
+            print(
+                f"Attenzione: {len(non_trovati)} comuni presenti "
+                f"nel file attrazioni ma non trovati nel dataset "
+                f"di sinistra (dopo normalizzazione fuzzy): "
+                f"{non_trovati}"
+            )
+
+        result = (
+            dataset.merge(
+                pivot.drop(columns=["comune"]),
+                on="_match_key",
+                how="left",
+            )
+            .drop(columns=["_match_key"])
+        )
+
+        result[MACRO_COLS] = (
+            result[MACRO_COLS]
+            .fillna(0)
+            .astype("Int64")
+        )
 
         return result
         
