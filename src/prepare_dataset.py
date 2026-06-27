@@ -5,22 +5,12 @@ def create_dataset():
     dataset_manager = DatasetManager()
 
     dataset = dataset_manager.load_comuni(
-        "data/input/Limiti01012024_g/Com01012024_g/Com01012024_g_WGS84.dbf"
+        "data/input/Com01012024_g/Com01012024_g_WGS84.dbf"
     )
 
     dataset = dataset_manager.add_tourism_data(
         dataset,
         "data/input/2. Dati comunali 2014-2024.xlsx"
-    )
-
-    dataset = dataset_manager.add_geological_characteristics(
-        dataset,
-        "data/input/Comuni - Caratteristiche del territorio Data Indagine 31-12-2024 Stampa 20062026171759.csv"
-    )
-
-    dataset = dataset_manager.add_cultural_attractions(
-        dataset,
-        "data/input/Attrazioni_culturali.csv"
     )
 
     dataset_manager.save_to_csv(
