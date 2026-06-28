@@ -1,0 +1,5 @@
+.venv/
+data/input/
+__pycache__/
+*.pyc
+*.pyo

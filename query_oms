@@ -1,0 +1,32 @@
+KM LINEE COSTA MARI
+
+[out:json][timeout:300][maxsize:1073741824];
+
+area["ISO3166-1"="IT"][admin_level=2]->.italia;
+
+(
+  way["natural"="coastline"](area.italia);
+);
+out geom;
+
+KM LINEE COSTA LAGHI
+
+[out:json][timeout:300][maxsize:1073741824];
+area["ISO3166-1"="IT"][admin_level=2]->.italia;
+(
+  relation["natural"="water"]["water"="lake"](area.italia);
+  way["natural"="water"]["water"="lake"](area.italia);
+);
+out geom;
+
+KMQ AREE PROTETTE
+
+[out:json][timeout:300][maxsize:1073741824];
+area["ISO3166-1"="IT"][admin_level=2]->.italia;
+(
+  relation["boundary"="protected_area"](area.italia);
+  way["boundary"="protected_area"](area.italia);
+  relation["leisure"="nature_reserve"](area.italia);
+  way["leisure"="nature_reserve"](area.italia);
+);
+out geom;
