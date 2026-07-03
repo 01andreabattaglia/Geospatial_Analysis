@@ -9,6 +9,7 @@ area["ISO3166-1"="IT"][admin_level=2]->.italia;
 );
 out geom;
 
+
 KM LINEE COSTA LAGHI
 
 [out:json][timeout:300][maxsize:1073741824];
@@ -18,6 +19,7 @@ area["ISO3166-1"="IT"][admin_level=2]->.italia;
   way["natural"="water"]["water"="lake"](area.italia);
 );
 out geom;
+
 
 KMQ AREE PROTETTE
 
@@ -30,3 +32,16 @@ area["ISO3166-1"="IT"][admin_level=2]->.italia;
   way["leisure"="nature_reserve"](area.italia);
 );
 out geom;
+
+
+MUSEUMS
+
+[out:json][timeout:60];
+area["ISO3166-1"="IT"][admin_level=2]->.italia;
+
+(
+  node["tourism"="museum"](area.italia);
+  node["tourism"="gallery"](area.italia);
+);
+
+out body;
