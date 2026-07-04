@@ -45,3 +45,18 @@ area["ISO3166-1"="IT"][admin_level=2]->.italia;
 );
 
 out body;
+
+HISTORICAL POI (tsv)
+
+[out:csv(::id, ::lat, ::lon, "natural", "name")][timeout:180];
+area["ISO3166-1"="IT"][admin_level=2]->.italia;
+
+(
+  node["natural"="hot_spring"](area.italia);
+  way["natural"="hot_spring"](area.italia);
+  relation["natural"="hot_spring"](area.italia);
+);
+out center;
+
+
+
