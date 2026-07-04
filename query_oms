@@ -34,29 +34,72 @@ area["ISO3166-1"="IT"][admin_level=2]->.italia;
 out geom;
 
 
-MUSEUMS
+HISTORICAL SITES AND MUSEUMS
 
-[out:json][timeout:60];
+[out:csv(::id, ::lat, ::lon, "tourism", "historic", "name")][timeout:180];
 area["ISO3166-1"="IT"][admin_level=2]->.italia;
 
 (
   node["tourism"="museum"](area.italia);
+  way["tourism"="museum"](area.italia);
+  relation["tourism"="museum"](area.italia);
+
   node["tourism"="gallery"](area.italia);
-);
+  way["tourism"="gallery"](area.italia);
+  relation["tourism"="gallery"](area.italia);
 
-out body;
+  node["historic"="monument"](area.italia);
+  way["historic"="monument"](area.italia);
+  relation["historic"="monument"](area.italia);
 
-HISTORICAL POI (tsv)
+  node["historic"="memorial"](area.italia);
+  way["historic"="memorial"](area.italia);
+  relation["historic"="memorial"](area.italia);
 
-[out:csv(::id, ::lat, ::lon, "natural", "name")][timeout:180];
-area["ISO3166-1"="IT"][admin_level=2]->.italia;
+  node["historic"="ruins"](area.italia);
+  way["historic"="ruins"](area.italia);
+  relation["historic"="ruins"](area.italia);
 
-(
-  node["natural"="hot_spring"](area.italia);
-  way["natural"="hot_spring"](area.italia);
-  relation["natural"="hot_spring"](area.italia);
+  node["historic"="archaeological_site"](area.italia);
+  way["historic"="archaeological_site"](area.italia);
+  relation["historic"="archaeological_site"](area.italia);
+
+  node["historic"="fort"](area.italia);
+  way["historic"="fort"](area.italia);
+  relation["historic"="fort"](area.italia);
 );
 out center;
 
+ARCHITECTURAL FEATURES
+
+[out:csv(::id, ::lat, ::lon, "tourism", "historic", "name")][timeout:180];
+area["ISO3166-1"="IT"][admin_level=2]->.italia;
+
+(
+  node["historic"="church"](area.italia);
+  way["historic"="church"](area.italia);
+  relation["historic"="church"](area.italia);
+
+  node["historic"="castle"](area.italia);
+  way["historic"="castle"](area.italia);
+  relation["historic"="castle"](area.italia);
+
+  node["historic"="manor"](area.italia);
+  way["historic"="manor"](area.italia);
+  relation["historic"="manor"](area.italia);
+
+  node["historic"="palace"](area.italia);
+  way["historic"="palace"](area.italia);
+  relation["historic"="palace"](area.italia);
+
+  node["historic"="city_gate"](area.italia);
+  way["historic"="city_gate"](area.italia);
+  relation["historic"="city_gate"](area.italia);
+
+  node["tourism"="artwork"](area.italia);
+  way["tourism"="artwork"](area.italia);
+  relation["tourism"="artwork"](area.italia);
+);
+out center;
 
 

@@ -6,7 +6,7 @@ if __name__ == "__main__":
     osm_dataset = osm.add_sea_coast_line(osm_dataset, "data/input/OpenStreetMap/coast_line.geojson")
     osm_dataset = osm.add_lake_coast_line(osm_dataset, "data/input/OpenStreetMap/lake_coast.geojson")
     osm_dataset = osm.add_protected_areas(osm_dataset, "data/input/OpenStreetMap/natural_parks.geojson")
-    osm_dataset = osm.add_museums(osm_dataset, "data/input/OpenStreetMap/museums.geojson")
-    osm_dataset = osm.add_historical_poi(osm_dataset, "data/input/OpenStreetMap/historical_poi.tsv")
+    osm_dataset = osm.add_historical_sites_and_museums(osm_dataset, "data/input/OpenStreetMap/historical_sites_and_museums.tsv")
+    osm_dataset = osm.add_architectural_features(osm_dataset, "data/input/OpenStreetMap/architectural_features.tsv")
 
     osm.save_to_csv(osm_dataset, "data/output/osm_dataset.csv")

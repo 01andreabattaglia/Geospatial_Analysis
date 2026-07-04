@@ -313,23 +313,23 @@ class OpenStreetMap:
 
         return result
 
-    def add_museums(
+    def add_historical_sites_and_museums(
         self,
         dataset: pd.DataFrame,
-        museums_geojson_path: str | Path,
+        museums_tsv_path: str | Path,
     ) -> pd.DataFrame:
         """Aggiunge al dataset il numero di musei per comune.
 
-        Supporta geometrie Point (nodi OSM) e Polygon/MultiPolygon
-        (way/relation OSM), in quest'ultimo caso il centroide viene usato
-        come punto di riferimento per il join spaziale.
+        Legge un TSV (tipicamente esportato da OSM/Overpass) con colonne
+        ``@id``, ``@lat``, ``@lon``, ``tourism``, ``historic``, ``name``.
+        Vengono considerati musei i record con ``tourism == "museum"``.
 
         Parameters
         ----------
         dataset:
             DataFrame con almeno le colonne ``cod_istat`` e ``comune``.
-        museums_geojson_path:
-            Percorso al GeoJSON dei musei (da OSM/Overpass).
+        museums_tsv_path:
+            Percorso al TSV dei musei (da OSM/Overpass).
 
         Returns
         -------
@@ -343,42 +343,45 @@ class OpenStreetMap:
                 "Chiama load_municipalities() prima di add_museums()."
             )
 
-        museums_geojson_path = Path(museums_geojson_path)
-        if not museums_geojson_path.exists():
-            raise FileNotFoundError(f"GeoJSON musei non trovato: {museums_geojson_path}")
+        museums_tsv_path = Path(museums_tsv_path)
+        if not museums_tsv_path.exists():
+            raise FileNotFoundError(f"TSV musei non trovato: {museums_tsv_path}")
 
         # carica i confini comunali in CRS metrico
         comuni = gpd.read_file(self._comuni_shp_path).to_crs(METRIC_CRS)
 
-        # carica i musei e normalizza il CRS
-        museums = gpd.read_file(museums_geojson_path)
-        if museums.crs is None:
-            museums = museums.set_crs("EPSG:4326")
+        # carica il TSV dei musei
+        museums_df = pd.read_csv(museums_tsv_path, sep="\t", dtype={"@id": str})
 
-        museums = museums[museums.geometry.notna()]
-
-        # separa punti da poligoni (way/relation OSM taggati come museo)
-        point_mask = museums.geom_type.isin(["Point", "MultiPoint"])
-        poly_mask = museums.geom_type.isin(["Polygon", "MultiPolygon"])
-
-        parts = []
-        if point_mask.any():
-            parts.append(museums[point_mask][["geometry"]])
-
-        if poly_mask.any():
-            # usa il centroide come punto rappresentativo
-            poly_as_points = museums[poly_mask][["geometry"]].copy()
-            poly_as_points["geometry"] = poly_as_points.geometry.centroid
-            parts.append(poly_as_points)
-
-        if not parts:
+        required_cols = {"@lat", "@lon", "tourism"}
+        missing_cols = required_cols - set(museums_df.columns)
+        if missing_cols:
             raise ValueError(
-                "Il GeoJSON dei musei non contiene geometrie valide "
-                "(attesi Point, MultiPoint, Polygon o MultiPolygon)."
+                f"Colonne mancanti nel TSV musei: {sorted(missing_cols)}"
             )
 
-        museums_points = pd.concat(parts, ignore_index=True)
-        museums_gdf = gpd.GeoDataFrame(museums_points, geometry="geometry", crs="EPSG:4326")
+        # tiene solo i record taggati come museo
+        museums_df = museums_df[museums_df["tourism"] == "museum"].copy()
+
+        # rimuove righe senza coordinate valide
+        museums_df = museums_df.dropna(subset=["@lat", "@lon"])
+        museums_df["@lat"] = pd.to_numeric(museums_df["@lat"], errors="coerce")
+        museums_df["@lon"] = pd.to_numeric(museums_df["@lon"], errors="coerce")
+        museums_df = museums_df.dropna(subset=["@lat", "@lon"])
+
+        if museums_df.empty:
+            raise ValueError(
+                "Il TSV dei musei non contiene record validi con "
+                "tourism == 'museum' e coordinate valide."
+            )
+
+        # costruisce le geometrie puntuali (lon, lat)
+        geometry = gpd.points_from_xy(museums_df["@lon"], museums_df["@lat"])
+        museums_gdf = gpd.GeoDataFrame(
+            museums_df[["@id", "name"]] if "name" in museums_df.columns else museums_df[["@id"]],
+            geometry=geometry,
+            crs="EPSG:4326",
+        )
         museums_gdf = museums_gdf.to_crs(METRIC_CRS)
 
         # spatial join: ogni museo → comune che lo contiene
@@ -404,12 +407,12 @@ class OpenStreetMap:
 
         return result
     
-    def add_historical_poi(
+    def add_architectural_features(
         self,
         dataset: pd.DataFrame,
-        historical_poi_tsv_path: str | Path,
+        architectural_poi_tsv_path: str | Path,
     ) -> pd.DataFrame:
-        """Aggiunge al dataset il numero di siti storico-monumentali per comune.
+        """Aggiunge al dataset il numero di siti architettonici per comune.
  
         Legge un TSV con colonne ``@id``, ``@lat``, ``@lon``, ``historic``
         (tipicamente esportato da Overpass, es. tag ``historic=monument``,
@@ -420,38 +423,38 @@ class OpenStreetMap:
         ----------
         dataset:
             DataFrame con almeno le colonne ``cod_istat`` e ``comune``.
-        historical_poi_tsv_path:
-            Percorso al TSV dei siti storici (da OSM/Overpass), es.
-            ``data/input/OpenStreetMap/historical_POI.tsv``.
+        architectural_poi_tsv_path:
+            Percorso al TSV dei siti architettonici (da OSM/Overpass), es.
+            ``data/input/OpenStreetMap/architectural_POI.tsv``.
  
         Returns
         -------
         pd.DataFrame
-            Dataset originale con la colonna aggiuntiva ``historical_sites``
-            (int, 0 per i comuni senza siti storico-monumentali).
+            Dataset originale con la colonna aggiuntiva ``architectural_features``
+            (int, 0 per i comuni senza siti architettonici).
         """
         if self._comuni_shp_path is None:
             raise RuntimeError(
                 "Shapefile dei comuni non disponibile. "
-                "Chiama load_municipalities() prima di add_historical_poi()."
+                "Chiama load_municipalities() prima di add_architectural_features()."
             )
  
-        historical_poi_tsv_path = Path(historical_poi_tsv_path)
-        if not historical_poi_tsv_path.exists():
+        architectural_poi_tsv_path = Path(architectural_poi_tsv_path)
+        if not architectural_poi_tsv_path.exists():
             raise FileNotFoundError(
-                f"TSV siti storico-monumentali non trovato: {historical_poi_tsv_path}"
+                f"TSV siti architettonici non trovato: {architectural_poi_tsv_path}"
             )
  
         # carica i confini comunali in CRS metrico
         comuni = gpd.read_file(self._comuni_shp_path).to_crs(METRIC_CRS)
  
-        # carica il TSV dei siti storici: tutto come stringa per evitare
+        # carica il TSV dei siti architettonici: tutto come stringa per evitare
         # DtypeWarning e per poter validare manualmente ogni riga prima
         # di convertire lat/lon, così eventuali righe disallineate (es.
         # con un campo mancante) vengono scartate invece di far crashare
         # il parsing dei float.
         poi_df = pd.read_csv(
-            historical_poi_tsv_path,
+            architectural_poi_tsv_path,
             sep="\t",
             dtype="string",
             low_memory=False,
@@ -473,9 +476,9 @@ class OpenStreetMap:
         n_invalid = n_total - valid_mask.sum()
         if n_invalid > 0:
             print(
-                f"[add_historical_poi] Attenzione: scartate {n_invalid} righe su "
+                f"[add_architectural_features] Attenzione: scartate {n_invalid} righe su "
                 f"{n_total} per coordinate non numeriche o disallineate "
-                f"(controllare {historical_poi_tsv_path})."
+                f"(controllare {architectural_poi_tsv_path})."
             )
  
         poi_df = poi_df[valid_mask].copy()
@@ -491,7 +494,7 @@ class OpenStreetMap:
             )
  
         if poi_df.empty:
-            raise ValueError("Il TSV dei siti storico-monumentali non contiene coordinate valide.")
+            raise ValueError("Il TSV dei siti architettonici non contiene coordinate valide.")
  
         poi_gdf = gpd.GeoDataFrame(
             poi_df,
@@ -500,7 +503,7 @@ class OpenStreetMap:
         )
         poi_gdf = poi_gdf.to_crs(METRIC_CRS)
  
-        # spatial join: ogni sito storico → comune che lo contiene
+        # spatial join: ogni sito architettonico → comune che lo contiene
         joined = gpd.sjoin(
             poi_gdf[["geometry"]],
             comuni[[COD_ISTAT_FIELD, "geometry"]],
@@ -512,14 +515,14 @@ class OpenStreetMap:
         poi_per_comune = (
             joined.groupby(COD_ISTAT_FIELD)
             .size()
-            .reset_index(name="historical_sites")
+            .reset_index(name="architectural_features")
             .rename(columns={COD_ISTAT_FIELD: "cod_istat"})
         )
-        poi_per_comune["historical_sites"] = poi_per_comune["historical_sites"].astype(int)
+        poi_per_comune["architectural_features"] = poi_per_comune["architectural_features"].astype(int)
  
         # unisce al dataset originale
         result = dataset.merge(poi_per_comune, on="cod_istat", how="left")
-        result["historical_sites"] = result["historical_sites"].fillna(0).astype(int)
+        result["architectural_features"] = result["architectural_features"].fillna(0).astype(int)
  
         return result
 
