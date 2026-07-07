@@ -526,6 +526,108 @@ class OpenStreetMap:
  
         return result
 
+    def add_sport_facilities(
+        self,
+        dataset: pd.DataFrame,
+        sport_facilities_tsv_path: str | Path,
+    ) -> pd.DataFrame:
+        """Aggiunge al dataset il numero di impianti sportivi per comune.
+
+        Legge un TSV (tipicamente esportato da OSM/Overpass) con colonne
+        ``@id``, ``@lat``, ``@lon``, ``leisure``, ``sport``, ``piste:type``,
+        ``aerialway``, ``name``. A differenza dei musei, qui non si filtra
+        per un singolo valore di tag: ogni record del TSV è già considerato
+        un impianto sportivo valido, dato che deriva da una query Overpass
+        che seleziona esclusivamente strutture sportive (centri sportivi,
+        campi, piscine, piste da sci, impianti di risalita, ecc.).
+
+        Parameters
+        ----------
+        dataset:
+            DataFrame con almeno le colonne ``cod_istat`` e ``comune``.
+        sport_facilities_tsv_path:
+            Percorso al TSV degli impianti sportivi (da OSM/Overpass).
+
+        Returns
+        -------
+        pd.DataFrame
+            Dataset originale con la colonna aggiuntiva ``sports_facilities``
+            (int, 0 per i comuni senza impianti).
+        """
+        if self._comuni_shp_path is None:
+            raise RuntimeError(
+                "Shapefile dei comuni non disponibile. "
+                "Chiama load_municipalities() prima di add_sport_facilities()."
+            )
+
+        sport_facilities_tsv_path = Path(sport_facilities_tsv_path)
+        if not sport_facilities_tsv_path.exists():
+            raise FileNotFoundError(
+                f"TSV impianti sportivi non trovato: {sport_facilities_tsv_path}"
+            )
+
+        # carica i confini comunali in CRS metrico
+        comuni = gpd.read_file(self._comuni_shp_path).to_crs(METRIC_CRS)
+
+        # carica il TSV degli impianti sportivi
+        facilities_df = pd.read_csv(
+            sport_facilities_tsv_path, sep="\t", dtype={"@id": str}
+        )
+
+        required_cols = {"@lat", "@lon"}
+        missing_cols = required_cols - set(facilities_df.columns)
+        if missing_cols:
+            raise ValueError(
+                f"Colonne mancanti nel TSV impianti sportivi: {sorted(missing_cols)}"
+            )
+
+        # rimuove righe senza coordinate valide
+        facilities_df = facilities_df.dropna(subset=["@lat", "@lon"])
+        facilities_df["@lat"] = pd.to_numeric(facilities_df["@lat"], errors="coerce")
+        facilities_df["@lon"] = pd.to_numeric(facilities_df["@lon"], errors="coerce")
+        facilities_df = facilities_df.dropna(subset=["@lat", "@lon"])
+
+        if facilities_df.empty:
+            raise ValueError(
+                "Il TSV degli impianti sportivi non contiene record validi "
+                "con coordinate valide."
+            )
+
+        # costruisce le geometrie puntuali (lon, lat)
+        geometry = gpd.points_from_xy(facilities_df["@lon"], facilities_df["@lat"])
+        keep_cols = [c for c in ["@id", "name"] if c in facilities_df.columns] or ["@id"]
+        facilities_gdf = gpd.GeoDataFrame(
+            facilities_df[keep_cols],
+            geometry=geometry,
+            crs="EPSG:4326",
+        )
+        facilities_gdf = facilities_gdf.to_crs(METRIC_CRS)
+
+        # spatial join: ogni impianto sportivo → comune che lo contiene
+        joined = gpd.sjoin(
+            facilities_gdf,
+            comuni[[COD_ISTAT_FIELD, "geometry"]],
+            how="left",
+            predicate="within",
+        )
+
+        # conta gli impianti per comune
+        facilities_per_comune = (
+            joined.groupby(COD_ISTAT_FIELD)
+            .size()
+            .reset_index(name="sports_facilities")
+            .rename(columns={COD_ISTAT_FIELD: "cod_istat"})
+        )
+        facilities_per_comune["sports_facilities"] = facilities_per_comune[
+            "sports_facilities"
+        ].astype(int)
+
+        # unisce al dataset originale
+        result = dataset.merge(facilities_per_comune, on="cod_istat", how="left")
+        result["sports_facilities"] = result["sports_facilities"].fillna(0).astype(int)
+
+        return result
+
     def save_to_csv(self, dataset: pd.DataFrame, output_csv_path: str | Path) -> None:
         output_csv_path = Path(output_csv_path)
         output_csv_path.parent.mkdir(parents=True, exist_ok=True)
