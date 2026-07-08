@@ -103,3 +103,90 @@ area["ISO3166-1"="IT"][admin_level=2]->.italia;
 out center;
 
 
+SPORTS FACILITIES
+
+[out:csv(::id, ::lat, ::lon, "leisure", "sport", "piste:type", "aerialway", "name")][timeout:900];
+area["ISO3166-1"="IT"][admin_level=2]->.italia;
+
+(
+  node["leisure"="sports_centre"](area.italia);
+  way["leisure"="sports_centre"](area.italia);
+
+  node["leisure"="stadium"](area.italia);
+  way["leisure"="stadium"](area.italia);
+
+  way["leisure"="pitch"](area.italia);
+
+  node["leisure"="swimming_pool"](area.italia);
+  way["leisure"="swimming_pool"](area.italia);
+
+  node["sport"="sports_hall"](area.italia);
+  way["sport"="sports_hall"](area.italia);
+
+  node["leisure"="marina"](area.italia);
+  way["leisure"="marina"](area.italia);
+
+  node["leisure"="slipway"](area.italia);
+  way["leisure"="slipway"](area.italia);
+
+  node["sport"="sailing"](area.italia);
+  way["sport"="sailing"](area.italia);
+
+  node["sport"="surfing"](area.italia);
+
+  node["sport"="scuba_diving"](area.italia);
+  way["sport"="scuba_diving"](area.italia);
+
+  way["piste:type"="downhill"](area.italia);
+  relation["piste:type"="downhill"](area.italia);
+
+  way["piste:type"="nordic"](area.italia);
+  relation["piste:type"="nordic"](area.italia);
+
+  way["aerialway"="cable_car"](area.italia);
+  way["aerialway"="chair_lift"](area.italia);
+
+  node["leisure"="golf_course"](area.italia);
+  way["leisure"="golf_course"](area.italia);
+
+  node["sport"="golf"](area.italia);
+  way["sport"="golf"](area.italia);
+
+  node["sport"="tennis"](area.italia);
+  way["sport"="tennis"](area.italia);
+);
+out center;
+
+
+NATURE BASED
+
+[out:csv(::id, ::lat, ::lon, "route", "leisure", "tourism", "amenity", "name")][timeout:900];
+area["ISO3166-1"="IT"][admin_level=2]->.italia;
+
+(
+  relation["route"="hiking"](area.italia);
+  way["route"="hiking"](area.italia);
+
+  relation["route"="bicycle"](area.italia);
+  way["route"="bicycle"](area.italia);
+
+  node["leisure"="nature_reserve"](area.italia);
+  way["leisure"="nature_reserve"](area.italia);
+  relation["leisure"="nature_reserve"](area.italia);
+
+  node["tourism"="alpine_hut"](area.italia);
+  way["tourism"="alpine_hut"](area.italia);
+
+  node["tourism"="wilderness_hut"](area.italia);
+  way["tourism"="wilderness_hut"](area.italia);
+
+  node["tourism"="camp_site"](area.italia);
+  way["tourism"="camp_site"](area.italia);
+
+  node["amenity"="spa"](area.italia);
+  way["amenity"="spa"](area.italia);
+
+  node["leisure"="spa"](area.italia);
+  way["leisure"="spa"](area.italia);
+);
+out center;

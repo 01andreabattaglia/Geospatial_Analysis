@@ -628,6 +628,112 @@ class OpenStreetMap:
 
         return result
 
+    def add_nature_based(
+        self,
+        dataset: pd.DataFrame,
+        nature_based_tsv_path: str | Path,
+    ) -> pd.DataFrame:
+        """Aggiunge al dataset il numero di strutture nature-based per comune.
+
+        Legge un TSV (tipicamente esportato da OSM/Overpass) con colonne
+        ``@id``, ``@lat``, ``@lon``, ``route``, ``leisure``, ``tourism``,
+        ``amenity``, ``name``. Come per gli impianti sportivi, non si filtra
+        per un singolo valore di tag: ogni record del TSV è già considerato
+        una struttura nature-based valida (campeggi, aree di sosta, percorsi
+        naturalistici, rifugi, ecc.), dato che deriva da una query Overpass
+        mirata a questo tipo di strutture.
+
+        Parameters
+        ----------
+        dataset:
+            DataFrame con almeno le colonne ``cod_istat`` e ``comune``.
+        nature_based_tsv_path:
+            Percorso al TSV delle strutture nature-based (da OSM/Overpass).
+
+        Returns
+        -------
+        pd.DataFrame
+            Dataset originale con la colonna aggiuntiva ``nature_based``
+            (int, 0 per i comuni senza strutture).
+        """
+        if self._comuni_shp_path is None:
+            raise RuntimeError(
+                "Shapefile dei comuni non disponibile. "
+                "Chiama load_municipalities() prima di add_nature_based()."
+            )
+
+        nature_based_tsv_path = Path(nature_based_tsv_path)
+        if not nature_based_tsv_path.exists():
+            raise FileNotFoundError(
+                f"TSV strutture nature-based non trovato: {nature_based_tsv_path}"
+            )
+
+        # carica i confini comunali in CRS metrico
+        comuni = gpd.read_file(self._comuni_shp_path).to_crs(METRIC_CRS)
+
+        # carica il TSV delle strutture nature-based
+        nature_df = pd.read_csv(
+            nature_based_tsv_path, sep="\t", dtype={"@id": str}
+        )
+
+        required_cols = {"@lat", "@lon"}
+        missing_cols = required_cols - set(nature_df.columns)
+        if missing_cols:
+            raise ValueError(
+                f"Colonne mancanti nel TSV strutture nature-based: {sorted(missing_cols)}"
+            )
+
+        # rimuove righe senza coordinate valide
+        nature_df = nature_df.dropna(subset=["@lat", "@lon"])
+        nature_df["@lat"] = pd.to_numeric(nature_df["@lat"], errors="coerce")
+        nature_df["@lon"] = pd.to_numeric(nature_df["@lon"], errors="coerce")
+        nature_df = nature_df.dropna(subset=["@lat", "@lon"])
+
+        if nature_df.empty:
+            raise ValueError(
+                "Il TSV delle strutture nature-based non contiene record validi "
+                "con coordinate valide."
+            )
+
+        # costruisce le geometrie puntuali (lon, lat)
+        geometry = gpd.points_from_xy(nature_df["@lon"], nature_df["@lat"])
+        keep_cols = [
+            c
+            for c in ["@id", "route", "leisure", "tourism", "amenity", "name"]
+            if c in nature_df.columns
+        ] or ["@id"]
+        nature_gdf = gpd.GeoDataFrame(
+            nature_df[keep_cols],
+            geometry=geometry,
+            crs="EPSG:4326",
+        )
+        nature_gdf = nature_gdf.to_crs(METRIC_CRS)
+
+        # spatial join: ogni struttura nature-based → comune che la contiene
+        joined = gpd.sjoin(
+            nature_gdf,
+            comuni[[COD_ISTAT_FIELD, "geometry"]],
+            how="left",
+            predicate="within",
+        )
+
+        # conta le strutture per comune
+        nature_per_comune = (
+            joined.groupby(COD_ISTAT_FIELD)
+            .size()
+            .reset_index(name="nature_based")
+            .rename(columns={COD_ISTAT_FIELD: "cod_istat"})
+        )
+        nature_per_comune["nature_based"] = nature_per_comune[
+            "nature_based"
+        ].astype(int)
+
+        # unisce al dataset originale
+        result = dataset.merge(nature_per_comune, on="cod_istat", how="left")
+        result["nature_based"] = result["nature_based"].fillna(0).astype(int)
+
+        return result
+
     def save_to_csv(self, dataset: pd.DataFrame, output_csv_path: str | Path) -> None:
         output_csv_path = Path(output_csv_path)
         output_csv_path.parent.mkdir(parents=True, exist_ok=True)
