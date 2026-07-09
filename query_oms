@@ -190,3 +190,20 @@ area["ISO3166-1"="IT"][admin_level=2]->.italia;
   way["leisure"="spa"](area.italia);
 );
 out center;
+
+
+AMUSEMENT/THEMES PARKS
+
+[out:csv(::id, ::lat, ::lon, "tourism", "leisure", "name")][timeout:900];
+area["ISO3166-1"="IT"][admin_level=2]->.italia;
+
+(
+  node["tourism"="theme_park"](area.italia);
+  way["tourism"="theme_park"](area.italia);
+  relation["tourism"="theme_park"](area.italia);
+
+  node["leisure"="water_park"](area.italia);
+  way["leisure"="water_park"](area.italia);
+  relation["leisure"="water_park"](area.italia);
+);
+out center;

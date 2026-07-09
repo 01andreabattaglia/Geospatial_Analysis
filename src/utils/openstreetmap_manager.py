@@ -734,6 +734,119 @@ class OpenStreetMap:
 
         return result
 
+    def add_theme_parks(
+        self,
+        dataset: pd.DataFrame,
+        theme_parks_tsv_path: str | Path,
+    ) -> pd.DataFrame:
+        """Aggiunge al dataset il numero di parchi tematici/acquatici per comune.
+
+        Legge un TSV (tipicamente esportato da OSM/Overpass) con colonne
+        ``@id``, ``@lat``, ``@lon``, ``tourism``, ``leisure``, ``name``,
+        ``disused:tourism``, ``construction:tourism``. Come per gli impianti
+        sportivi, non si filtra per un singolo valore di tag: ogni record
+        del TSV è già considerato una struttura valida (parchi tematici,
+        parchi acquatici, ecc.), dato che deriva da una query Overpass
+        mirata a questo tipo di strutture.
+
+        Parameters
+        ----------
+        dataset:
+            DataFrame con almeno le colonne ``cod_istat`` e ``comune``.
+        theme_parks_tsv_path:
+            Percorso al TSV dei parchi tematici (da OSM/Overpass).
+
+        Returns
+        -------
+        pd.DataFrame
+            Dataset originale con la colonna aggiuntiva ``theme_parks``
+            (int, 0 per i comuni senza strutture).
+        """
+        if self._comuni_shp_path is None:
+            raise RuntimeError(
+                "Shapefile dei comuni non disponibile. "
+                "Chiama load_municipalities() prima di add_theme_parks()."
+            )
+
+        theme_parks_tsv_path = Path(theme_parks_tsv_path)
+        if not theme_parks_tsv_path.exists():
+            raise FileNotFoundError(
+                f"TSV parchi tematici non trovato: {theme_parks_tsv_path}"
+            )
+
+        # carica i confini comunali in CRS metrico
+        comuni = gpd.read_file(self._comuni_shp_path).to_crs(METRIC_CRS)
+
+        # carica il TSV dei parchi tematici
+        theme_df = pd.read_csv(
+            theme_parks_tsv_path, sep="\t", dtype={"@id": str}
+        )
+
+        required_cols = {"@lat", "@lon"}
+        missing_cols = required_cols - set(theme_df.columns)
+        if missing_cols:
+            raise ValueError(
+                f"Colonne mancanti nel TSV parchi tematici: {sorted(missing_cols)}"
+            )
+
+        # rimuove righe senza coordinate valide
+        theme_df = theme_df.dropna(subset=["@lat", "@lon"])
+        theme_df["@lat"] = pd.to_numeric(theme_df["@lat"], errors="coerce")
+        theme_df["@lon"] = pd.to_numeric(theme_df["@lon"], errors="coerce")
+        theme_df = theme_df.dropna(subset=["@lat", "@lon"])
+
+        if theme_df.empty:
+            raise ValueError(
+                "Il TSV dei parchi tematici non contiene record validi "
+                "con coordinate valide."
+            )
+
+        # costruisce le geometrie puntuali (lon, lat)
+        geometry = gpd.points_from_xy(theme_df["@lon"], theme_df["@lat"])
+        keep_cols = [
+            c
+            for c in [
+                "@id",
+                "tourism",
+                "leisure",
+                "name",
+                "disused:tourism",
+                "construction:tourism",
+            ]
+            if c in theme_df.columns
+        ] or ["@id"]
+        theme_gdf = gpd.GeoDataFrame(
+            theme_df[keep_cols],
+            geometry=geometry,
+            crs="EPSG:4326",
+        )
+        theme_gdf = theme_gdf.to_crs(METRIC_CRS)
+
+        # spatial join: ogni parco tematico → comune che lo contiene
+        joined = gpd.sjoin(
+            theme_gdf,
+            comuni[[COD_ISTAT_FIELD, "geometry"]],
+            how="left",
+            predicate="within",
+        )
+
+        # conta le strutture per comune
+        theme_parks_per_comune = (
+            joined.groupby(COD_ISTAT_FIELD)
+            .size()
+            .reset_index(name="theme_parks")
+            .rename(columns={COD_ISTAT_FIELD: "cod_istat"})
+        )
+        theme_parks_per_comune["theme_parks"] = theme_parks_per_comune[
+            "theme_parks"
+        ].astype(int)
+
+        # unisce al dataset originale
+        result = dataset.merge(theme_parks_per_comune, on="cod_istat", how="left")
+        result["theme_parks"] = result["theme_parks"].fillna(0).astype(int)
+
+        return result
+
     def save_to_csv(self, dataset: pd.DataFrame, output_csv_path: str | Path) -> None:
         output_csv_path = Path(output_csv_path)
         output_csv_path.parent.mkdir(parents=True, exist_ok=True)
