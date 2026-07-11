@@ -11,7 +11,7 @@ from shapely.ops import linemerge
 METRIC_CRS = "EPSG:32632"
 COD_ISTAT_FIELD = "PRO_COM"
 COMUNE_NAME_FIELD = "COMUNE"
-BOUNDARY_BUFFER_METERS = 30
+BOUNDARY_BUFFER_METERS = 20
 
 
 def _extract_lines(geom):
@@ -844,6 +844,111 @@ class OpenStreetMap:
         # unisce al dataset originale
         result = dataset.merge(theme_parks_per_comune, on="cod_istat", how="left")
         result["theme_parks"] = result["theme_parks"].fillna(0).astype(int)
+
+        return result
+
+    def add_nightlife(
+        self,
+        dataset: pd.DataFrame,
+        nightlife_tsv_path: str | Path,
+    ) -> pd.DataFrame:
+        """Aggiunge al dataset il numero di locali per la vita notturna per comune.
+
+        Legge un TSV (tipicamente esportato da OSM/Overpass) con colonne
+        ``@id``, ``@lat``, ``@lon``, ``amenity``, ``name``. Come per gli
+        impianti sportivi, non si filtra per un singolo valore di tag: ogni
+        record del TSV è già considerato una struttura valida (pub, bar,
+        locali notturni, ecc.), dato che deriva da una query Overpass
+        mirata a questo tipo di strutture.
+
+        Parameters
+        ----------
+        dataset:
+            DataFrame con almeno le colonne ``cod_istat`` e ``comune``.
+        nightlife_tsv_path:
+            Percorso al TSV dei locali per la vita notturna (da OSM/Overpass).
+
+        Returns
+        -------
+        pd.DataFrame
+            Dataset originale con la colonna aggiuntiva ``nightlife``
+            (int, 0 per i comuni senza strutture).
+        """
+        if self._comuni_shp_path is None:
+            raise RuntimeError(
+                "Shapefile dei comuni non disponibile. "
+                "Chiama load_municipalities() prima di add_nightlife()."
+            )
+
+        nightlife_tsv_path = Path(nightlife_tsv_path)
+        if not nightlife_tsv_path.exists():
+            raise FileNotFoundError(
+                f"TSV locali vita notturna non trovato: {nightlife_tsv_path}"
+            )
+
+        # carica i confini comunali in CRS metrico
+        comuni = gpd.read_file(self._comuni_shp_path).to_crs(METRIC_CRS)
+
+        # carica il TSV dei locali per la vita notturna
+        nightlife_df = pd.read_csv(
+            nightlife_tsv_path, sep="\t", dtype={"@id": str}
+        )
+
+        required_cols = {"@lat", "@lon"}
+        missing_cols = required_cols - set(nightlife_df.columns)
+        if missing_cols:
+            raise ValueError(
+                f"Colonne mancanti nel TSV locali vita notturna: {sorted(missing_cols)}"
+            )
+
+        # rimuove righe senza coordinate valide
+        nightlife_df = nightlife_df.dropna(subset=["@lat", "@lon"])
+        nightlife_df["@lat"] = pd.to_numeric(nightlife_df["@lat"], errors="coerce")
+        nightlife_df["@lon"] = pd.to_numeric(nightlife_df["@lon"], errors="coerce")
+        nightlife_df = nightlife_df.dropna(subset=["@lat", "@lon"])
+
+        if nightlife_df.empty:
+            raise ValueError(
+                "Il TSV dei locali per la vita notturna non contiene record validi "
+                "con coordinate valide."
+            )
+
+        # costruisce le geometrie puntuali (lon, lat)
+        geometry = gpd.points_from_xy(nightlife_df["@lon"], nightlife_df["@lat"])
+        keep_cols = [
+            c
+            for c in ["@id", "amenity", "name"]
+            if c in nightlife_df.columns
+        ] or ["@id"]
+        nightlife_gdf = gpd.GeoDataFrame(
+            nightlife_df[keep_cols],
+            geometry=geometry,
+            crs="EPSG:4326",
+        )
+        nightlife_gdf = nightlife_gdf.to_crs(METRIC_CRS)
+
+        # spatial join: ogni locale → comune che lo contiene
+        joined = gpd.sjoin(
+            nightlife_gdf,
+            comuni[[COD_ISTAT_FIELD, "geometry"]],
+            how="left",
+            predicate="within",
+        )
+
+        # conta le strutture per comune
+        nightlife_per_comune = (
+            joined.groupby(COD_ISTAT_FIELD)
+            .size()
+            .reset_index(name="nightlife")
+            .rename(columns={COD_ISTAT_FIELD: "cod_istat"})
+        )
+        nightlife_per_comune["nightlife"] = nightlife_per_comune[
+            "nightlife"
+        ].astype(int)
+
+        # unisce al dataset originale
+        result = dataset.merge(nightlife_per_comune, on="cod_istat", how="left")
+        result["nightlife"] = result["nightlife"].fillna(0).astype(int)
 
         return result
 

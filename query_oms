@@ -207,3 +207,24 @@ area["ISO3166-1"="IT"][admin_level=2]->.italia;
   relation["leisure"="water_park"](area.italia);
 );
 out center;
+
+
+NIGHTLIFE
+
+[out:csv(::id, ::lat, ::lon, "amenity", "name")][timeout:900];
+area["ISO3166-1"="IT"][admin_level=2]->.italia;
+
+(
+  node["amenity"="bar"](area.italia);
+  way["amenity"="bar"](area.italia);
+
+  node["amenity"="pub"](area.italia);
+  way["amenity"="pub"](area.italia);
+
+  node["amenity"="nightclub"](area.italia);
+  way["amenity"="nightclub"](area.italia);
+);
+out center;
+
+
+LOCAL TRANSPORT SYSTEMS
