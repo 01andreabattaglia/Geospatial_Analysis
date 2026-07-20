@@ -65,23 +65,6 @@ Explanatory variables are organized according to a three-macro-category framewor
 6. **Interpretation** — direct, indirect (spillover), and total effects of the explanatory variables.
 7. **Interactive map** — visualization of results (e.g., residuals, spatial clusters, estimated effects) on an ISTAT geographic base using an interactive mapping library (e.g., Folium, Plotly, Leaflet).
 
-## Repository structure (indicative)
-
-```
-/data
-  /raw            # ISTAT shapefiles, OSM extracts, raw data
-  /processed       # processed municipal dataset ready for analysis
-/scripts
-  01_data_extraction.py   # variable extraction from OSM/ISTAT
-  02_data_join.py         # spatial joins and final dataset construction
-  03_sar_model.py          # SAR model estimation and diagnostics
-  04_map.py                # interactive map generation
-/outputs
-  /maps
-  /tables
-  /figures
-README.md
-```
 
 ## Progress status
 
