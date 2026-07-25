@@ -251,3 +251,42 @@ LOCAL TRANSPORT SYSTEMS
 );
 out center;
 
+[out:csv(::id, ::lat, ::lon, "highway", "railway", "public_transport", "name")][timeout:900];
+
+(
+  area["name"="Toscana"]["admin_level"="4"];
+  area["name"="Umbria"]["admin_level"="4"];
+  area["name"="Marche"]["admin_level"="4"];
+  area["name"="Lazio"]["admin_level"="4"];
+)->.centro;
+
+(
+  node["highway"="bus_stop"](area.centro);
+  node["railway"="station"](area.centro);
+  way["railway"="station"](area.centro);
+  node["railway"="halt"](area.centro);
+  node["public_transport"="stop_position"](area.centro);
+);
+out center;
+
+[out:csv(::id, ::lat, ::lon, "highway", "railway", "public_transport", "name")][timeout:900];
+
+(
+  area["name"="Abruzzo"]["admin_level"="4"];
+  area["name"="Molise"]["admin_level"="4"];
+  area["name"="Campania"]["admin_level"="4"];
+  area["name"="Puglia"]["admin_level"="4"];
+  area["name"="Basilicata"]["admin_level"="4"];
+  area["name"="Calabria"]["admin_level"="4"];
+  area["name"="Sicilia"]["admin_level"="4"];
+  area["name"="Sardegna"]["admin_level"="4"];
+)->.sud;
+
+(
+  node["highway"="bus_stop"](area.sud);
+  node["railway"="station"](area.sud);
+  way["railway"="station"](area.sud);
+  node["railway"="halt"](area.sud);
+  node["public_transport"="stop_position"](area.sud);
+);
+out center;

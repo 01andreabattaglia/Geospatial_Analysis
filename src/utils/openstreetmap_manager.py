@@ -4,6 +4,7 @@ import unicodedata
 from pathlib import Path
 
 import geopandas as gpd
+from shapely.geometry import Point
 import pandas as pd
 from shapely.geometry import GeometryCollection, LineString, MultiLineString
 from shapely.ops import linemerge
@@ -547,6 +548,57 @@ class OpenStreetMap:
             self.dataset["public_transport_points"] + self.dataset["new_public_transport_points"]
         ).astype(int)
         self.dataset = self.dataset.drop(columns=["new_public_transport_points"])
+        return self
+    
+    def add_airport_straight_distance(self, airports_tsv_path: str | Path) -> "OpenStreetMap":
+        self._require_dataset("add_airport_straight_distance")
+
+        airports_tsv_path = Path(airports_tsv_path)
+        if not airports_tsv_path.exists():
+            raise FileNotFoundError(f"TSV aeroporti non trovato: {airports_tsv_path}")
+
+        comuni = gpd.read_file(self._comuni_shp_path).to_crs(METRIC_CRS)
+        comuni = comuni[comuni[COD_ISTAT_FIELD].isin(self.dataset["cod_istat"])]
+        comuni = comuni.copy()
+        comuni["geometry"] = comuni.geometry.centroid
+
+        airports_df = pd.read_csv(airports_tsv_path, sep="\t", dtype={"@id": str})
+
+        required_cols = {"@lat", "@lon"}
+        missing_cols = required_cols - set(airports_df.columns)
+        if missing_cols:
+            raise ValueError(f"Colonne mancanti nel TSV aeroporti: {sorted(missing_cols)}")
+
+        airports_df = airports_df.dropna(subset=["@lat", "@lon"])
+        airports_df["@lat"] = pd.to_numeric(airports_df["@lat"], errors="coerce")
+        airports_df["@lon"] = pd.to_numeric(airports_df["@lon"], errors="coerce")
+        airports_df = airports_df.dropna(subset=["@lat", "@lon"])
+
+        if airports_df.empty:
+            raise ValueError("Il TSV degli aeroporti non contiene record validi con coordinate valide.")
+
+        geometry = gpd.points_from_xy(airports_df["@lon"], airports_df["@lat"])
+        airports_gdf = gpd.GeoDataFrame(airports_df[["@id"]], geometry=geometry, crs="EPSG:4326")
+        airports_gdf = airports_gdf.to_crs(METRIC_CRS)
+
+        # join per il vicino più prossimo: ogni comune -> aeroporto più vicino + distanza in metri
+        joined = gpd.sjoin_nearest(
+            comuni[[COD_ISTAT_FIELD, "geometry"]],
+            airports_gdf[["geometry"]],
+            how="left",
+            distance_col="dist_m",
+        )
+
+        distance_df = (
+            joined.groupby(COD_ISTAT_FIELD)["dist_m"]
+            .min()
+            .reset_index()
+            .rename(columns={COD_ISTAT_FIELD: "cod_istat"})
+        )
+        distance_df["airport_straight_km"] = (distance_df["dist_m"] / 1000.0).round(3)
+        distance_df = distance_df.drop(columns=["dist_m"])
+
+        self._merge_column(distance_df, "airport_straight_km", fill_value=None)
         return self
 
     # ------------------------------------------------------------------

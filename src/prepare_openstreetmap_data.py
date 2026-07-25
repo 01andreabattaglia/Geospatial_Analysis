@@ -15,5 +15,6 @@ if __name__ == "__main__":
     osm.add_public_transport_points("data/input/OpenStreetMap/public_transport_north_italy.tsv")
     osm.add_public_transport_points("data/input/OpenStreetMap/public_transport_central_italy.tsv")
     osm.add_public_transport_points("data/input/OpenStreetMap/public_transport_south_italy.tsv")
+    osm.add_airport_straight_distance("data/input/OpenStreetMap/public_airports.tsv")
 
     osm.save_to_csv("data/output/osm_dataset.csv")
