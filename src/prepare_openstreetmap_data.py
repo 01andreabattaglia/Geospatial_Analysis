@@ -12,5 +12,8 @@ if __name__ == "__main__":
     osm_dataset = osm.add_nature_based(osm_dataset, "data/input/OpenStreetMap/nature_based.tsv")
     osm_dataset = osm.add_theme_parks(osm_dataset, "data/input/OpenStreetMap/theme_parks.tsv")
     osm_dataset = osm.add_nightlife(osm_dataset, "data/input/OpenStreetMap/nightlife.tsv")
+    osm_dataset = osm.add_public_transport_points(osm_dataset, "data/input/OpenStreetMap/public_transport_north_italy.tsv")
+    osm_dataset = osm.add_public_transport_points(osm_dataset, "data/input/OpenStreetMap/public_transport_central_italy.tsv")
+    osm_dataset = osm.add_public_transport_points(osm_dataset, "data/input/OpenStreetMap/public_transport_south_italy.tsv")
 
     osm.save_to_csv(osm_dataset, "data/output/osm_dataset.csv")

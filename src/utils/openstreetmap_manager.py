@@ -951,6 +951,129 @@ class OpenStreetMap:
         result["nightlife"] = result["nightlife"].fillna(0).astype(int)
 
         return result
+    
+    def add_public_transport_points(
+        self,
+        dataset: pd.DataFrame,
+        public_transport_tsv_path: str | Path,
+    ) -> pd.DataFrame:
+        """Aggiunge/aggiorna nel dataset il conteggio dei punti di trasporto pubblico per comune.
+
+        A differenza di ``add_sport_facilities``, questo metodo è pensato per
+        essere chiamato più volte in sequenza (tipicamente una volta per
+        ciascun file Nord/Centro/Sud): ogni chiamata legge UN SOLO TSV,
+        conta i punti di trasporto pubblico per comune e SOMMA il risultato
+        alla colonna ``public_transport_points`` già presente nel dataset,
+        senza azzerare i conteggi ottenuti dalle chiamate precedenti.
+
+        Legge un TSV (tipicamente esportato da OSM/Overpass) con colonne
+        ``@id``, ``@lat``, ``@lon``, ``highway``, ``railway``,
+        ``public_transport``, ``name``. Come per gli impianti sportivi, non
+        si filtra per un singolo valore di tag: ogni record del TSV è già
+        considerato un punto di trasporto pubblico valido, dato che deriva
+        da una query Overpass che seleziona esclusivamente fermate/stazioni.
+
+        Parameters
+        ----------
+        dataset:
+            DataFrame con almeno le colonne ``cod_istat`` e ``comune``.
+            Se non contiene ancora la colonna ``public_transport_points``,
+            questa viene creata e inizializzata a 0.
+        public_transport_tsv_path:
+            Percorso al TSV dei punti di trasporto pubblico (da OSM/Overpass)
+            relativo a UNA sola area (es. solo Nord, solo Centro o solo Sud).
+
+        Returns
+        -------
+        pd.DataFrame
+            Dataset originale con la colonna ``public_transport_points``
+            (int) aggiornata sommando i conteggi del file passato a quelli
+            già presenti.
+        """
+        if self._comuni_shp_path is None:
+            raise RuntimeError(
+                "Shapefile dei comuni non disponibile. "
+                "Chiama load_municipalities() prima di add_public_transport_points()."
+            )
+
+        public_transport_tsv_path = Path(public_transport_tsv_path)
+        if not public_transport_tsv_path.exists():
+            raise FileNotFoundError(
+                f"TSV punti di trasporto pubblico non trovato: {public_transport_tsv_path}"
+            )
+
+        # carica i confini comunali in CRS metrico
+        comuni = gpd.read_file(self._comuni_shp_path).to_crs(METRIC_CRS)
+
+        # carica il TSV dei punti di trasporto pubblico
+        transport_df = pd.read_csv(
+            public_transport_tsv_path, sep="\t", dtype={"@id": str}
+        )
+
+        required_cols = {"@lat", "@lon"}
+        missing_cols = required_cols - set(transport_df.columns)
+        if missing_cols:
+            raise ValueError(
+                f"Colonne mancanti nel TSV trasporto pubblico: {sorted(missing_cols)}"
+            )
+
+        # rimuove righe senza coordinate valide
+        transport_df = transport_df.dropna(subset=["@lat", "@lon"])
+        transport_df["@lat"] = pd.to_numeric(transport_df["@lat"], errors="coerce")
+        transport_df["@lon"] = pd.to_numeric(transport_df["@lon"], errors="coerce")
+        transport_df = transport_df.dropna(subset=["@lat", "@lon"])
+
+        if transport_df.empty:
+            raise ValueError(
+                "Il TSV dei punti di trasporto pubblico non contiene record "
+                "validi con coordinate valide."
+            )
+
+        # costruisce le geometrie puntuali (lon, lat)
+        geometry = gpd.points_from_xy(transport_df["@lon"], transport_df["@lat"])
+        keep_cols = [c for c in ["@id", "name"] if c in transport_df.columns] or ["@id"]
+        transport_gdf = gpd.GeoDataFrame(
+            transport_df[keep_cols],
+            geometry=geometry,
+            crs="EPSG:4326",
+        )
+        transport_gdf = transport_gdf.to_crs(METRIC_CRS)
+
+        # spatial join: ogni punto di trasporto pubblico → comune che lo contiene
+        joined = gpd.sjoin(
+            transport_gdf,
+            comuni[[COD_ISTAT_FIELD, "geometry"]],
+            how="left",
+            predicate="within",
+        )
+
+        # conta i punti per comune per QUESTO SOLO file
+        points_per_comune = (
+            joined.groupby(COD_ISTAT_FIELD)
+            .size()
+            .reset_index(name="new_public_transport_points")
+            .rename(columns={COD_ISTAT_FIELD: "cod_istat"})
+        )
+        points_per_comune["new_public_transport_points"] = points_per_comune[
+            "new_public_transport_points"
+        ].astype(int)
+
+        # assicura che la colonna cumulativa esista già nel dataset
+        result = dataset.copy()
+        if "public_transport_points" not in result.columns:
+            result["public_transport_points"] = 0
+
+        # unisce i nuovi conteggi e li SOMMA a quelli già presenti
+        result = result.merge(points_per_comune, on="cod_istat", how="left")
+        result["new_public_transport_points"] = (
+            result["new_public_transport_points"].fillna(0).astype(int)
+        )
+        result["public_transport_points"] = (
+            result["public_transport_points"] + result["new_public_transport_points"]
+        ).astype(int)
+        result = result.drop(columns=["new_public_transport_points"])
+
+        return result
 
     def save_to_csv(self, dataset: pd.DataFrame, output_csv_path: str | Path) -> None:
         output_csv_path = Path(output_csv_path)

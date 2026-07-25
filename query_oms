@@ -228,3 +228,26 @@ out center;
 
 
 LOCAL TRANSPORT SYSTEMS
+
+[out:csv(::id, ::lat, ::lon, "highway", "railway", "public_transport", "name")][timeout:900];
+
+(
+  area["name"="Piemonte"]["admin_level"="4"];
+  area["name"="Valle d'Aosta"]["admin_level"="4"];
+  area["name"="Lombardia"]["admin_level"="4"];
+  area["name"="Trentino-Alto Adige"]["admin_level"="4"];
+  area["name"="Veneto"]["admin_level"="4"];
+  area["name"="Friuli-Venezia Giulia"]["admin_level"="4"];
+  area["name"="Liguria"]["admin_level"="4"];
+  area["name"="Emilia-Romagna"]["admin_level"="4"];
+)->.nord;
+
+(
+  node["highway"="bus_stop"](area.nord);
+  node["railway"="station"](area.nord);
+  way["railway"="station"](area.nord);
+  node["railway"="halt"](area.nord);
+  node["public_transport"="stop_position"](area.nord);
+);
+out center;
+
