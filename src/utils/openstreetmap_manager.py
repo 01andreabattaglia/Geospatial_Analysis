@@ -37,11 +37,63 @@ def _normalize_name(name) -> str | None:
 
 
 class OpenStreetMap:
+    """Ogni metodo `add_*` lavora sul dataset interno `self.dataset`.
+
+    Uso tipico::
+
+        osm = OpenStreetMap()
+        osm.load_municipalities(path_shp)
+        osm.add_sea_coast_line(path_geojson)
+        osm.add_lake_coast_line(path_geojson)
+        ...
+        osm.save_to_csv(path_csv)
+
+    Non è più necessario passare/riassegnare il DataFrame tra un metodo e
+    l'altro: ognuno legge e aggiorna `self.dataset` in-place e ritorna
+    `self`, così le chiamate possono anche essere concatenate (chaining)
+    se lo si desidera, ma non è obbligatorio.
+    """
 
     def __init__(self) -> None:
         self._comuni_shp_path: Path | None = None
+        self.dataset: pd.DataFrame | None = None
 
-    def load_municipalities(self, comuni_shp_path: str | Path) -> pd.DataFrame:
+    # ------------------------------------------------------------------
+    # Helpers interni
+    # ------------------------------------------------------------------
+
+    def _require_dataset(self, caller_name: str) -> None:
+        if self.dataset is None or self._comuni_shp_path is None:
+            raise RuntimeError(
+                f"Dataset non inizializzato. Chiama load_municipalities() prima di {caller_name}()."
+            )
+
+    def _merge_column(
+        self,
+        new_col_df: pd.DataFrame,
+        col: str,
+        fill_value=0,
+        round_ndigits: int | None = None,
+        as_int: bool = False,
+    ) -> None:
+        """Aggancia una nuova colonna (indicizzata per cod_istat) a self.dataset."""
+        self.dataset = self.dataset.merge(
+            new_col_df[["cod_istat", col]], on="cod_istat", how="left"
+        )
+        self.dataset[col] = self.dataset[col].fillna(fill_value)
+        if round_ndigits is not None:
+            self.dataset[col] = self.dataset[col].round(round_ndigits)
+        if as_int:
+            self.dataset[col] = self.dataset[col].astype(int)
+
+    def _load_comuni_metric(self) -> gpd.GeoDataFrame:
+        return gpd.read_file(self._comuni_shp_path).to_crs(METRIC_CRS)
+
+    # ------------------------------------------------------------------
+    # Caricamento base
+    # ------------------------------------------------------------------
+
+    def load_municipalities(self, comuni_shp_path: str | Path) -> "OpenStreetMap":
         comuni_shp_path = Path(comuni_shp_path)
         if not comuni_shp_path.exists():
             raise FileNotFoundError(f"Shapefile comuni non trovato: {comuni_shp_path}")
@@ -60,28 +112,30 @@ class OpenStreetMap:
 
         self._comuni_shp_path = comuni_shp_path
 
-        df = pd.DataFrame(gdf.drop(columns="geometry"))
-        return df.select_dtypes(include=["number", "object"])
+        df = pd.DataFrame(gdf.drop(columns="geometry")).select_dtypes(include=["number", "object"])
 
+        self.dataset = (
+            df[[COD_ISTAT_FIELD, COMUNE_NAME_FIELD]]
+            .rename(columns={COD_ISTAT_FIELD: "cod_istat", COMUNE_NAME_FIELD: "comune"})
+            .sort_values("cod_istat")
+            .reset_index(drop=True)
+        )
+        return self
 
-    def add_sea_coast_line(
-        self,
-        municipalities: pd.DataFrame,
-        coastline_geojson_path: str | Path,
-    ) -> pd.DataFrame:
+    # ------------------------------------------------------------------
+    # Metodi che agganciano nuove colonne a self.dataset
+    # ------------------------------------------------------------------
+
+    def add_sea_coast_line(self, coastline_geojson_path: str | Path) -> "OpenStreetMap":
+        self._require_dataset("add_sea_coast_line")
+
         coastline_geojson_path = Path(coastline_geojson_path)
         if not coastline_geojson_path.exists():
             raise FileNotFoundError(f"GeoJSON linea di costa non trovato: {coastline_geojson_path}")
 
-        if self._comuni_shp_path is None:
-            raise ValueError("Shapefile comuni non caricato. Chiama prima load_municipalities().")
-
-        # Ricarica la geometria dallo shapefile per uso interno
         gdf_comuni = gpd.read_file(self._comuni_shp_path)
         comuni = gdf_comuni[[COD_ISTAT_FIELD, COMUNE_NAME_FIELD, "geometry"]].to_crs(METRIC_CRS)
-
-        # Filtra solo i comuni presenti nel DataFrame in input
-        comuni = comuni[comuni[COD_ISTAT_FIELD].isin(municipalities[COD_ISTAT_FIELD])]
+        comuni = comuni[comuni[COD_ISTAT_FIELD].isin(self.dataset["cod_istat"])]
 
         coastline = gpd.read_file(coastline_geojson_path)
         if coastline.crs is None:
@@ -149,52 +203,21 @@ class OpenStreetMap:
             coast_combined.groupby([COD_ISTAT_FIELD, COMUNE_NAME_FIELD])["km_costa_mare"]
             .sum()
             .reset_index()
+            .rename(columns={COD_ISTAT_FIELD: "cod_istat"})
         )
 
-        result = municipalities[[COD_ISTAT_FIELD, COMUNE_NAME_FIELD]].merge(
-            coast_per_comune, on=[COD_ISTAT_FIELD, COMUNE_NAME_FIELD], how="left"
-        )
-        result["km_costa_mare"] = result["km_costa_mare"].fillna(0.0).round(3)
+        self._merge_column(coast_per_comune, "km_costa_mare", fill_value=0.0, round_ndigits=3)
+        return self
 
-        return result.rename(
-            columns={COD_ISTAT_FIELD: "cod_istat", COMUNE_NAME_FIELD: "comune"}
-        ).sort_values("cod_istat").reset_index(drop=True)
-
-    def add_lake_coast_line(
-        self,
-        dataset: pd.DataFrame,
-        lake_geojson_path: str | Path,
-    ) -> pd.DataFrame:
-        """Aggiunge al dataset i chilometri di costa lago per comune.
-
-        Parameters
-        ----------
-        dataset:
-            DataFrame prodotto da :meth:`generate_coast_line`, con almeno
-            le colonne ``cod_istat`` e ``comune``.
-        lake_geojson_path:
-            Percorso al GeoJSON del lago (Polygon/MultiPolygon da OSM/Overpass).
-
-        Returns
-        -------
-        pd.DataFrame
-            Dataset originale con la colonna aggiuntiva ``km_costa_lago``
-            (float, arrotondato a 3 decimali; 0.0 per i comuni senza costa lago).
-        """
-        if self._comuni_shp_path is None:
-            raise RuntimeError(
-                "Shapefile dei comuni non disponibile. "
-                "Chiama load_municipalities() prima di add_lake_coastline()."
-            )
+    def add_lake_coast_line(self, lake_geojson_path: str | Path) -> "OpenStreetMap":
+        self._require_dataset("add_lake_coast_line")
 
         lake_geojson_path = Path(lake_geojson_path)
         if not lake_geojson_path.exists():
             raise FileNotFoundError(f"GeoJSON lago non trovato: {lake_geojson_path}")
 
-        # recupera le geometrie dei comuni dallo shapefile salvato in load_municipalities
-        comuni = gpd.read_file(self._comuni_shp_path).to_crs(METRIC_CRS)
+        comuni = self._load_comuni_metric()
 
-        # carica e prepara il perimetro del lago
         lake = gpd.read_file(lake_geojson_path)
         if lake.crs is None:
             lake = lake.set_crs("EPSG:4326")
@@ -209,11 +232,9 @@ class OpenStreetMap:
             lambda geom: geom.boundary if geom.geom_type in ("Polygon", "MultiPolygon") else geom
         )
 
-        # buffer sui comuni per catturare tratti sul confine esatto
         comuni_buffered = comuni[[COD_ISTAT_FIELD, "geometry"]].copy()
         comuni_buffered["geometry"] = comuni_buffered.geometry.buffer(BOUNDARY_BUFFER_METERS)
 
-        # intersezione perimetro lago × comuni bufferizzati
         intersection = gpd.overlay(
             lake[["geometry"]],
             comuni_buffered,
@@ -224,7 +245,6 @@ class OpenStreetMap:
         intersection = intersection[intersection.geometry.notna()]
         intersection["km_costa_lago"] = (intersection.geometry.length / 1000.0).round(3)
 
-        # aggrega per comune
         coast_per_comune = (
             intersection.groupby(COD_ISTAT_FIELD)["km_costa_lago"]
             .sum()
@@ -233,48 +253,18 @@ class OpenStreetMap:
             .rename(columns={COD_ISTAT_FIELD: "cod_istat"})
         )
 
-        # unisce al dataset originale
-        result = dataset.merge(coast_per_comune, on="cod_istat", how="left")
-        result["km_costa_lago"] = result["km_costa_lago"].fillna(0.0)
+        self._merge_column(coast_per_comune, "km_costa_lago", fill_value=0.0, round_ndigits=3)
+        return self
 
-        return result
-    
-    def add_protected_areas(
-        self,
-        dataset: pd.DataFrame,
-        parks_geojson_path: str | Path,
-    ) -> pd.DataFrame:
-        """Aggiunge al dataset i chilometri quadrati coperti da aree protette per comune.
-
-        Parameters
-        ----------
-        dataset:
-            DataFrame prodotto da :meth:`generate_coast_line`, con almeno
-            le colonne ``cod_istat`` e ``comune``.
-        parks_geojson_path:
-            Percorso al GeoJSON delle aree naturali protette (Polygon/MultiPolygon
-            da OSM/Overpass), es. ``data/input/OpenStreetMap/natural_parks.geojson``.
-
-        Returns
-        -------
-        pd.DataFrame
-            Dataset originale con la colonna aggiuntiva ``kmq_aree_protette``
-            (float, arrotondato a 3 decimali; 0.0 per i comuni senza aree protette).
-        """
-        if self._comuni_shp_path is None:
-            raise RuntimeError(
-                "Shapefile dei comuni non disponibile. "
-                "Chiama load_municipalities() prima di add_protected_areas()."
-            )
+    def add_protected_areas(self, parks_geojson_path: str | Path) -> "OpenStreetMap":
+        self._require_dataset("add_protected_areas")
 
         parks_geojson_path = Path(parks_geojson_path)
         if not parks_geojson_path.exists():
             raise FileNotFoundError(f"GeoJSON aree protette non trovato: {parks_geojson_path}")
 
-        # recupera le geometrie dei comuni dallo shapefile salvato in load_municipalities
-        comuni = gpd.read_file(self._comuni_shp_path).to_crs(METRIC_CRS)
+        comuni = self._load_comuni_metric()
 
-        # carica e prepara le aree protette
         parks = gpd.read_file(parks_geojson_path)
         if parks.crs is None:
             parks = parks.set_crs("EPSG:4326")
@@ -286,19 +276,15 @@ class OpenStreetMap:
 
         parks = parks.to_crs(METRIC_CRS)
 
-        # intersezione aree protette × comuni (senza buffer: le superfici devono sovrapporsi)
         intersection = gpd.overlay(
             parks[["geometry"]],
             comuni[[COD_ISTAT_FIELD, COMUNE_NAME_FIELD, "geometry"]],
             how="intersection",
             keep_geom_type=False,
         )
-        intersection = intersection[
-            intersection.geom_type.isin(["Polygon", "MultiPolygon"])
-        ]
+        intersection = intersection[intersection.geom_type.isin(["Polygon", "MultiPolygon"])]
         intersection["kmq_aree_protette"] = (intersection.geometry.area / 1_000_000.0).round(3)
 
-        # aggrega per comune
         area_per_comune = (
             intersection.groupby(COD_ISTAT_FIELD)["kmq_aree_protette"]
             .sum()
@@ -307,159 +293,96 @@ class OpenStreetMap:
             .rename(columns={COD_ISTAT_FIELD: "cod_istat"})
         )
 
-        # unisce al dataset originale
-        result = dataset.merge(area_per_comune, on="cod_istat", how="left")
-        result["kmq_aree_protette"] = result["kmq_aree_protette"].fillna(0.0)
+        self._merge_column(area_per_comune, "kmq_aree_protette", fill_value=0.0, round_ndigits=3)
+        return self
 
-        return result
-
-    def add_historical_sites_and_museums(
+    def _add_point_based_count(
         self,
-        dataset: pd.DataFrame,
-        museums_tsv_path: str | Path,
-    ) -> pd.DataFrame:
-        """Aggiunge al dataset il numero di musei per comune.
+        tsv_path: str | Path,
+        col_name: str,
+        caller_name: str,
+        keep_cols_candidates: list[str],
+        filter_fn=None,
+        require_message: str | None = None,
+    ) -> None:
+        """Factory comune a tutti i metodi 'conta punti OSM per comune'."""
+        self._require_dataset(caller_name)
 
-        Legge un TSV (tipicamente esportato da OSM/Overpass) con colonne
-        ``@id``, ``@lat``, ``@lon``, ``tourism``, ``historic``, ``name``.
-        Vengono considerati musei i record con ``tourism == "museum"``.
+        tsv_path = Path(tsv_path)
+        if not tsv_path.exists():
+            raise FileNotFoundError(f"TSV non trovato: {tsv_path}")
 
-        Parameters
-        ----------
-        dataset:
-            DataFrame con almeno le colonne ``cod_istat`` e ``comune``.
-        museums_tsv_path:
-            Percorso al TSV dei musei (da OSM/Overpass).
+        comuni = self._load_comuni_metric()
 
-        Returns
-        -------
-        pd.DataFrame
-            Dataset originale con la colonna aggiuntiva ``museums``
-            (int, 0 per i comuni senza musei).
-        """
-        if self._comuni_shp_path is None:
-            raise RuntimeError(
-                "Shapefile dei comuni non disponibile. "
-                "Chiama load_municipalities() prima di add_museums()."
-            )
+        df = pd.read_csv(tsv_path, sep="\t", dtype={"@id": str})
 
-        museums_tsv_path = Path(museums_tsv_path)
-        if not museums_tsv_path.exists():
-            raise FileNotFoundError(f"TSV musei non trovato: {museums_tsv_path}")
-
-        # carica i confini comunali in CRS metrico
-        comuni = gpd.read_file(self._comuni_shp_path).to_crs(METRIC_CRS)
-
-        # carica il TSV dei musei
-        museums_df = pd.read_csv(museums_tsv_path, sep="\t", dtype={"@id": str})
-
-        required_cols = {"@lat", "@lon", "tourism"}
-        missing_cols = required_cols - set(museums_df.columns)
+        required_cols = {"@lat", "@lon"}
+        missing_cols = required_cols - set(df.columns)
         if missing_cols:
-            raise ValueError(
-                f"Colonne mancanti nel TSV musei: {sorted(missing_cols)}"
-            )
+            raise ValueError(f"Colonne mancanti nel TSV: {sorted(missing_cols)}")
 
-        # tiene solo i record taggati come museo
-        museums_df = museums_df[museums_df["tourism"] == "museum"].copy()
+        if filter_fn is not None:
+            df = filter_fn(df)
 
-        # rimuove righe senza coordinate valide
-        museums_df = museums_df.dropna(subset=["@lat", "@lon"])
-        museums_df["@lat"] = pd.to_numeric(museums_df["@lat"], errors="coerce")
-        museums_df["@lon"] = pd.to_numeric(museums_df["@lon"], errors="coerce")
-        museums_df = museums_df.dropna(subset=["@lat", "@lon"])
+        df = df.dropna(subset=["@lat", "@lon"])
+        df["@lat"] = pd.to_numeric(df["@lat"], errors="coerce")
+        df["@lon"] = pd.to_numeric(df["@lon"], errors="coerce")
+        df = df.dropna(subset=["@lat", "@lon"])
 
-        if museums_df.empty:
-            raise ValueError(
-                "Il TSV dei musei non contiene record validi con "
-                "tourism == 'museum' e coordinate valide."
-            )
+        if df.empty:
+            raise ValueError(require_message or "Il TSV non contiene record validi con coordinate valide.")
 
-        # costruisce le geometrie puntuali (lon, lat)
-        geometry = gpd.points_from_xy(museums_df["@lon"], museums_df["@lat"])
-        museums_gdf = gpd.GeoDataFrame(
-            museums_df[["@id", "name"]] if "name" in museums_df.columns else museums_df[["@id"]],
-            geometry=geometry,
-            crs="EPSG:4326",
-        )
-        museums_gdf = museums_gdf.to_crs(METRIC_CRS)
+        geometry = gpd.points_from_xy(df["@lon"], df["@lat"])
+        keep_cols = [c for c in keep_cols_candidates if c in df.columns] or ["@id"]
+        gdf = gpd.GeoDataFrame(df[keep_cols], geometry=geometry, crs="EPSG:4326").to_crs(METRIC_CRS)
 
-        # spatial join: ogni museo → comune che lo contiene
         joined = gpd.sjoin(
-            museums_gdf,
-            comuni[[COD_ISTAT_FIELD, "geometry"]],
-            how="left",
-            predicate="within",
+            gdf, comuni[[COD_ISTAT_FIELD, "geometry"]], how="left", predicate="within"
         )
 
-        # conta i musei per comune
-        museums_per_comune = (
+        counts = (
             joined.groupby(COD_ISTAT_FIELD)
             .size()
-            .reset_index(name="museums")
+            .reset_index(name=col_name)
             .rename(columns={COD_ISTAT_FIELD: "cod_istat"})
         )
-        museums_per_comune["museums"] = museums_per_comune["museums"].astype(int)
+        counts[col_name] = counts[col_name].astype(int)
 
-        # unisce al dataset originale
-        result = dataset.merge(museums_per_comune, on="cod_istat", how="left")
-        result["museums"] = result["museums"].fillna(0).astype(int)
+        self._merge_column(counts, col_name, fill_value=0, as_int=True)
 
-        return result
-    
-    def add_architectural_features(
-        self,
-        dataset: pd.DataFrame,
-        architectural_poi_tsv_path: str | Path,
-    ) -> pd.DataFrame:
-        """Aggiunge al dataset il numero di siti architettonici per comune.
- 
-        Legge un TSV con colonne ``@id``, ``@lat``, ``@lon``, ``historic``
-        (tipicamente esportato da Overpass, es. tag ``historic=monument``,
-        ``historic=castle``, ``historic=archaeological_site``, ecc.) e
-        conta quanti punti ricadono in ciascun comune tramite join spaziale.
- 
-        Parameters
-        ----------
-        dataset:
-            DataFrame con almeno le colonne ``cod_istat`` e ``comune``.
-        architectural_poi_tsv_path:
-            Percorso al TSV dei siti architettonici (da OSM/Overpass), es.
-            ``data/input/OpenStreetMap/architectural_POI.tsv``.
- 
-        Returns
-        -------
-        pd.DataFrame
-            Dataset originale con la colonna aggiuntiva ``architectural_features``
-            (int, 0 per i comuni senza siti architettonici).
-        """
-        if self._comuni_shp_path is None:
-            raise RuntimeError(
-                "Shapefile dei comuni non disponibile. "
-                "Chiama load_municipalities() prima di add_architectural_features()."
-            )
- 
+    def add_historical_sites_and_museums(self, museums_tsv_path: str | Path) -> "OpenStreetMap":
+        def _filter(df: pd.DataFrame) -> pd.DataFrame:
+            return df[df["tourism"] == "museum"].copy()
+
+        self._add_point_based_count(
+            museums_tsv_path,
+            col_name="museums",
+            caller_name="add_historical_sites_and_museums",
+            keep_cols_candidates=["@id", "name"],
+            filter_fn=_filter,
+            require_message=(
+                "Il TSV dei musei non contiene record validi con "
+                "tourism == 'museum' e coordinate valide."
+            ),
+        )
+        return self
+
+    def add_architectural_features(self, architectural_poi_tsv_path: str | Path) -> "OpenStreetMap":
+        # Gestione dedicata per righe disallineate: legge tutto come stringa
+        # e valida manualmente lat/lon prima di convertirle, così eventuali
+        # righe corrotte vengono scartate senza far crashare il parsing.
+        self._require_dataset("add_architectural_features")
+
         architectural_poi_tsv_path = Path(architectural_poi_tsv_path)
         if not architectural_poi_tsv_path.exists():
             raise FileNotFoundError(
                 f"TSV siti architettonici non trovato: {architectural_poi_tsv_path}"
             )
- 
-        # carica i confini comunali in CRS metrico
-        comuni = gpd.read_file(self._comuni_shp_path).to_crs(METRIC_CRS)
- 
-        # carica il TSV dei siti architettonici: tutto come stringa per evitare
-        # DtypeWarning e per poter validare manualmente ogni riga prima
-        # di convertire lat/lon, così eventuali righe disallineate (es.
-        # con un campo mancante) vengono scartate invece di far crashare
-        # il parsing dei float.
-        poi_df = pd.read_csv(
-            architectural_poi_tsv_path,
-            sep="\t",
-            dtype="string",
-            low_memory=False,
-        )
- 
+
+        comuni = self._load_comuni_metric()
+
+        poi_df = pd.read_csv(architectural_poi_tsv_path, sep="\t", dtype="string", low_memory=False)
+
         required_cols = {"@lat", "@lon"}
         missing = required_cols - set(poi_df.columns)
         if missing:
@@ -467,12 +390,12 @@ class OpenStreetMap:
                 f"Campi attesi non trovati nel TSV: {sorted(missing)}. "
                 f"Colonne disponibili: {list(poi_df.columns)}"
             )
- 
+
         n_total = len(poi_df)
         lat_numeric = pd.to_numeric(poi_df["@lat"], errors="coerce")
         lon_numeric = pd.to_numeric(poi_df["@lon"], errors="coerce")
         valid_mask = lat_numeric.notna() & lon_numeric.notna()
- 
+
         n_invalid = n_total - valid_mask.sum()
         if n_invalid > 0:
             print(
@@ -480,38 +403,25 @@ class OpenStreetMap:
                 f"{n_total} per coordinate non numeriche o disallineate "
                 f"(controllare {architectural_poi_tsv_path})."
             )
- 
+
         poi_df = poi_df[valid_mask].copy()
         poi_df["@lat"] = lat_numeric[valid_mask]
         poi_df["@lon"] = lon_numeric[valid_mask]
- 
-        required_cols = {"@lat", "@lon"}
-        missing = required_cols - set(poi_df.columns)
-        if missing:
-            raise ValueError(
-                f"Campi attesi non trovati nel TSV: {sorted(missing)}. "
-                f"Colonne disponibili: {list(poi_df.columns)}"
-            )
- 
+
         if poi_df.empty:
             raise ValueError("Il TSV dei siti architettonici non contiene coordinate valide.")
- 
+
         poi_gdf = gpd.GeoDataFrame(
-            poi_df,
-            geometry=gpd.points_from_xy(poi_df["@lon"], poi_df["@lat"]),
-            crs="EPSG:4326",
-        )
-        poi_gdf = poi_gdf.to_crs(METRIC_CRS)
- 
-        # spatial join: ogni sito architettonico → comune che lo contiene
+            poi_df, geometry=gpd.points_from_xy(poi_df["@lon"], poi_df["@lat"]), crs="EPSG:4326"
+        ).to_crs(METRIC_CRS)
+
         joined = gpd.sjoin(
             poi_gdf[["geometry"]],
             comuni[[COD_ISTAT_FIELD, "geometry"]],
             how="left",
             predicate="within",
         )
- 
-        # conta i siti per comune
+
         poi_per_comune = (
             joined.groupby(COD_ISTAT_FIELD)
             .size()
@@ -519,482 +429,67 @@ class OpenStreetMap:
             .rename(columns={COD_ISTAT_FIELD: "cod_istat"})
         )
         poi_per_comune["architectural_features"] = poi_per_comune["architectural_features"].astype(int)
- 
-        # unisce al dataset originale
-        result = dataset.merge(poi_per_comune, on="cod_istat", how="left")
-        result["architectural_features"] = result["architectural_features"].fillna(0).astype(int)
- 
-        return result
 
-    def add_sport_facilities(
-        self,
-        dataset: pd.DataFrame,
-        sport_facilities_tsv_path: str | Path,
-    ) -> pd.DataFrame:
-        """Aggiunge al dataset il numero di impianti sportivi per comune.
+        self._merge_column(poi_per_comune, "architectural_features", fill_value=0, as_int=True)
+        return self
 
-        Legge un TSV (tipicamente esportato da OSM/Overpass) con colonne
-        ``@id``, ``@lat``, ``@lon``, ``leisure``, ``sport``, ``piste:type``,
-        ``aerialway``, ``name``. A differenza dei musei, qui non si filtra
-        per un singolo valore di tag: ogni record del TSV è già considerato
-        un impianto sportivo valido, dato che deriva da una query Overpass
-        che seleziona esclusivamente strutture sportive (centri sportivi,
-        campi, piscine, piste da sci, impianti di risalita, ecc.).
+    def add_sport_facilities(self, sport_facilities_tsv_path: str | Path) -> "OpenStreetMap":
+        self._add_point_based_count(
+            sport_facilities_tsv_path,
+            col_name="sports_facilities",
+            caller_name="add_sport_facilities",
+            keep_cols_candidates=["@id", "name"],
+            require_message=(
+                "Il TSV degli impianti sportivi non contiene record validi con coordinate valide."
+            ),
+        )
+        return self
 
-        Parameters
-        ----------
-        dataset:
-            DataFrame con almeno le colonne ``cod_istat`` e ``comune``.
-        sport_facilities_tsv_path:
-            Percorso al TSV degli impianti sportivi (da OSM/Overpass).
+    def add_nature_based(self, nature_based_tsv_path: str | Path) -> "OpenStreetMap":
+        self._add_point_based_count(
+            nature_based_tsv_path,
+            col_name="nature_based",
+            caller_name="add_nature_based",
+            keep_cols_candidates=["@id", "route", "leisure", "tourism", "amenity", "name"],
+            require_message=(
+                "Il TSV delle strutture nature-based non contiene record validi con coordinate valide."
+            ),
+        )
+        return self
 
-        Returns
-        -------
-        pd.DataFrame
-            Dataset originale con la colonna aggiuntiva ``sports_facilities``
-            (int, 0 per i comuni senza impianti).
+    def add_theme_parks(self, theme_parks_tsv_path: str | Path) -> "OpenStreetMap":
+        self._add_point_based_count(
+            theme_parks_tsv_path,
+            col_name="theme_parks",
+            caller_name="add_theme_parks",
+            keep_cols_candidates=[
+                "@id", "tourism", "leisure", "name", "disused:tourism", "construction:tourism",
+            ],
+            require_message="Il TSV dei parchi tematici non contiene record validi con coordinate valide.",
+        )
+        return self
+
+    def add_nightlife(self, nightlife_tsv_path: str | Path) -> "OpenStreetMap":
+        self._add_point_based_count(
+            nightlife_tsv_path,
+            col_name="nightlife",
+            caller_name="add_nightlife",
+            keep_cols_candidates=["@id", "amenity", "name"],
+            require_message=(
+                "Il TSV dei locali per la vita notturna non contiene record validi con coordinate valide."
+            ),
+        )
+        return self
+
+    def add_public_transport_points(self, public_transport_tsv_path: str | Path) -> "OpenStreetMap":
+        """Somma i punti di trasporto pubblico alla colonna cumulativa.
+
+        Pensato per essere chiamato più volte in sequenza (es. una volta per
+        Nord/Centro/Sud): ogni chiamata legge UN SOLO TSV e SOMMA il
+        conteggio alla colonna ``public_transport_points`` già presente in
+        ``self.dataset``, senza azzerare i conteggi precedenti.
         """
-        if self._comuni_shp_path is None:
-            raise RuntimeError(
-                "Shapefile dei comuni non disponibile. "
-                "Chiama load_municipalities() prima di add_sport_facilities()."
-            )
-
-        sport_facilities_tsv_path = Path(sport_facilities_tsv_path)
-        if not sport_facilities_tsv_path.exists():
-            raise FileNotFoundError(
-                f"TSV impianti sportivi non trovato: {sport_facilities_tsv_path}"
-            )
-
-        # carica i confini comunali in CRS metrico
-        comuni = gpd.read_file(self._comuni_shp_path).to_crs(METRIC_CRS)
-
-        # carica il TSV degli impianti sportivi
-        facilities_df = pd.read_csv(
-            sport_facilities_tsv_path, sep="\t", dtype={"@id": str}
-        )
-
-        required_cols = {"@lat", "@lon"}
-        missing_cols = required_cols - set(facilities_df.columns)
-        if missing_cols:
-            raise ValueError(
-                f"Colonne mancanti nel TSV impianti sportivi: {sorted(missing_cols)}"
-            )
-
-        # rimuove righe senza coordinate valide
-        facilities_df = facilities_df.dropna(subset=["@lat", "@lon"])
-        facilities_df["@lat"] = pd.to_numeric(facilities_df["@lat"], errors="coerce")
-        facilities_df["@lon"] = pd.to_numeric(facilities_df["@lon"], errors="coerce")
-        facilities_df = facilities_df.dropna(subset=["@lat", "@lon"])
-
-        if facilities_df.empty:
-            raise ValueError(
-                "Il TSV degli impianti sportivi non contiene record validi "
-                "con coordinate valide."
-            )
-
-        # costruisce le geometrie puntuali (lon, lat)
-        geometry = gpd.points_from_xy(facilities_df["@lon"], facilities_df["@lat"])
-        keep_cols = [c for c in ["@id", "name"] if c in facilities_df.columns] or ["@id"]
-        facilities_gdf = gpd.GeoDataFrame(
-            facilities_df[keep_cols],
-            geometry=geometry,
-            crs="EPSG:4326",
-        )
-        facilities_gdf = facilities_gdf.to_crs(METRIC_CRS)
-
-        # spatial join: ogni impianto sportivo → comune che lo contiene
-        joined = gpd.sjoin(
-            facilities_gdf,
-            comuni[[COD_ISTAT_FIELD, "geometry"]],
-            how="left",
-            predicate="within",
-        )
-
-        # conta gli impianti per comune
-        facilities_per_comune = (
-            joined.groupby(COD_ISTAT_FIELD)
-            .size()
-            .reset_index(name="sports_facilities")
-            .rename(columns={COD_ISTAT_FIELD: "cod_istat"})
-        )
-        facilities_per_comune["sports_facilities"] = facilities_per_comune[
-            "sports_facilities"
-        ].astype(int)
-
-        # unisce al dataset originale
-        result = dataset.merge(facilities_per_comune, on="cod_istat", how="left")
-        result["sports_facilities"] = result["sports_facilities"].fillna(0).astype(int)
-
-        return result
-
-    def add_nature_based(
-        self,
-        dataset: pd.DataFrame,
-        nature_based_tsv_path: str | Path,
-    ) -> pd.DataFrame:
-        """Aggiunge al dataset il numero di strutture nature-based per comune.
-
-        Legge un TSV (tipicamente esportato da OSM/Overpass) con colonne
-        ``@id``, ``@lat``, ``@lon``, ``route``, ``leisure``, ``tourism``,
-        ``amenity``, ``name``. Come per gli impianti sportivi, non si filtra
-        per un singolo valore di tag: ogni record del TSV è già considerato
-        una struttura nature-based valida (campeggi, aree di sosta, percorsi
-        naturalistici, rifugi, ecc.), dato che deriva da una query Overpass
-        mirata a questo tipo di strutture.
-
-        Parameters
-        ----------
-        dataset:
-            DataFrame con almeno le colonne ``cod_istat`` e ``comune``.
-        nature_based_tsv_path:
-            Percorso al TSV delle strutture nature-based (da OSM/Overpass).
-
-        Returns
-        -------
-        pd.DataFrame
-            Dataset originale con la colonna aggiuntiva ``nature_based``
-            (int, 0 per i comuni senza strutture).
-        """
-        if self._comuni_shp_path is None:
-            raise RuntimeError(
-                "Shapefile dei comuni non disponibile. "
-                "Chiama load_municipalities() prima di add_nature_based()."
-            )
-
-        nature_based_tsv_path = Path(nature_based_tsv_path)
-        if not nature_based_tsv_path.exists():
-            raise FileNotFoundError(
-                f"TSV strutture nature-based non trovato: {nature_based_tsv_path}"
-            )
-
-        # carica i confini comunali in CRS metrico
-        comuni = gpd.read_file(self._comuni_shp_path).to_crs(METRIC_CRS)
-
-        # carica il TSV delle strutture nature-based
-        nature_df = pd.read_csv(
-            nature_based_tsv_path, sep="\t", dtype={"@id": str}
-        )
-
-        required_cols = {"@lat", "@lon"}
-        missing_cols = required_cols - set(nature_df.columns)
-        if missing_cols:
-            raise ValueError(
-                f"Colonne mancanti nel TSV strutture nature-based: {sorted(missing_cols)}"
-            )
-
-        # rimuove righe senza coordinate valide
-        nature_df = nature_df.dropna(subset=["@lat", "@lon"])
-        nature_df["@lat"] = pd.to_numeric(nature_df["@lat"], errors="coerce")
-        nature_df["@lon"] = pd.to_numeric(nature_df["@lon"], errors="coerce")
-        nature_df = nature_df.dropna(subset=["@lat", "@lon"])
-
-        if nature_df.empty:
-            raise ValueError(
-                "Il TSV delle strutture nature-based non contiene record validi "
-                "con coordinate valide."
-            )
-
-        # costruisce le geometrie puntuali (lon, lat)
-        geometry = gpd.points_from_xy(nature_df["@lon"], nature_df["@lat"])
-        keep_cols = [
-            c
-            for c in ["@id", "route", "leisure", "tourism", "amenity", "name"]
-            if c in nature_df.columns
-        ] or ["@id"]
-        nature_gdf = gpd.GeoDataFrame(
-            nature_df[keep_cols],
-            geometry=geometry,
-            crs="EPSG:4326",
-        )
-        nature_gdf = nature_gdf.to_crs(METRIC_CRS)
-
-        # spatial join: ogni struttura nature-based → comune che la contiene
-        joined = gpd.sjoin(
-            nature_gdf,
-            comuni[[COD_ISTAT_FIELD, "geometry"]],
-            how="left",
-            predicate="within",
-        )
-
-        # conta le strutture per comune
-        nature_per_comune = (
-            joined.groupby(COD_ISTAT_FIELD)
-            .size()
-            .reset_index(name="nature_based")
-            .rename(columns={COD_ISTAT_FIELD: "cod_istat"})
-        )
-        nature_per_comune["nature_based"] = nature_per_comune[
-            "nature_based"
-        ].astype(int)
-
-        # unisce al dataset originale
-        result = dataset.merge(nature_per_comune, on="cod_istat", how="left")
-        result["nature_based"] = result["nature_based"].fillna(0).astype(int)
-
-        return result
-
-    def add_theme_parks(
-        self,
-        dataset: pd.DataFrame,
-        theme_parks_tsv_path: str | Path,
-    ) -> pd.DataFrame:
-        """Aggiunge al dataset il numero di parchi tematici/acquatici per comune.
-
-        Legge un TSV (tipicamente esportato da OSM/Overpass) con colonne
-        ``@id``, ``@lat``, ``@lon``, ``tourism``, ``leisure``, ``name``,
-        ``disused:tourism``, ``construction:tourism``. Come per gli impianti
-        sportivi, non si filtra per un singolo valore di tag: ogni record
-        del TSV è già considerato una struttura valida (parchi tematici,
-        parchi acquatici, ecc.), dato che deriva da una query Overpass
-        mirata a questo tipo di strutture.
-
-        Parameters
-        ----------
-        dataset:
-            DataFrame con almeno le colonne ``cod_istat`` e ``comune``.
-        theme_parks_tsv_path:
-            Percorso al TSV dei parchi tematici (da OSM/Overpass).
-
-        Returns
-        -------
-        pd.DataFrame
-            Dataset originale con la colonna aggiuntiva ``theme_parks``
-            (int, 0 per i comuni senza strutture).
-        """
-        if self._comuni_shp_path is None:
-            raise RuntimeError(
-                "Shapefile dei comuni non disponibile. "
-                "Chiama load_municipalities() prima di add_theme_parks()."
-            )
-
-        theme_parks_tsv_path = Path(theme_parks_tsv_path)
-        if not theme_parks_tsv_path.exists():
-            raise FileNotFoundError(
-                f"TSV parchi tematici non trovato: {theme_parks_tsv_path}"
-            )
-
-        # carica i confini comunali in CRS metrico
-        comuni = gpd.read_file(self._comuni_shp_path).to_crs(METRIC_CRS)
-
-        # carica il TSV dei parchi tematici
-        theme_df = pd.read_csv(
-            theme_parks_tsv_path, sep="\t", dtype={"@id": str}
-        )
-
-        required_cols = {"@lat", "@lon"}
-        missing_cols = required_cols - set(theme_df.columns)
-        if missing_cols:
-            raise ValueError(
-                f"Colonne mancanti nel TSV parchi tematici: {sorted(missing_cols)}"
-            )
-
-        # rimuove righe senza coordinate valide
-        theme_df = theme_df.dropna(subset=["@lat", "@lon"])
-        theme_df["@lat"] = pd.to_numeric(theme_df["@lat"], errors="coerce")
-        theme_df["@lon"] = pd.to_numeric(theme_df["@lon"], errors="coerce")
-        theme_df = theme_df.dropna(subset=["@lat", "@lon"])
-
-        if theme_df.empty:
-            raise ValueError(
-                "Il TSV dei parchi tematici non contiene record validi "
-                "con coordinate valide."
-            )
-
-        # costruisce le geometrie puntuali (lon, lat)
-        geometry = gpd.points_from_xy(theme_df["@lon"], theme_df["@lat"])
-        keep_cols = [
-            c
-            for c in [
-                "@id",
-                "tourism",
-                "leisure",
-                "name",
-                "disused:tourism",
-                "construction:tourism",
-            ]
-            if c in theme_df.columns
-        ] or ["@id"]
-        theme_gdf = gpd.GeoDataFrame(
-            theme_df[keep_cols],
-            geometry=geometry,
-            crs="EPSG:4326",
-        )
-        theme_gdf = theme_gdf.to_crs(METRIC_CRS)
-
-        # spatial join: ogni parco tematico → comune che lo contiene
-        joined = gpd.sjoin(
-            theme_gdf,
-            comuni[[COD_ISTAT_FIELD, "geometry"]],
-            how="left",
-            predicate="within",
-        )
-
-        # conta le strutture per comune
-        theme_parks_per_comune = (
-            joined.groupby(COD_ISTAT_FIELD)
-            .size()
-            .reset_index(name="theme_parks")
-            .rename(columns={COD_ISTAT_FIELD: "cod_istat"})
-        )
-        theme_parks_per_comune["theme_parks"] = theme_parks_per_comune[
-            "theme_parks"
-        ].astype(int)
-
-        # unisce al dataset originale
-        result = dataset.merge(theme_parks_per_comune, on="cod_istat", how="left")
-        result["theme_parks"] = result["theme_parks"].fillna(0).astype(int)
-
-        return result
-
-    def add_nightlife(
-        self,
-        dataset: pd.DataFrame,
-        nightlife_tsv_path: str | Path,
-    ) -> pd.DataFrame:
-        """Aggiunge al dataset il numero di locali per la vita notturna per comune.
-
-        Legge un TSV (tipicamente esportato da OSM/Overpass) con colonne
-        ``@id``, ``@lat``, ``@lon``, ``amenity``, ``name``. Come per gli
-        impianti sportivi, non si filtra per un singolo valore di tag: ogni
-        record del TSV è già considerato una struttura valida (pub, bar,
-        locali notturni, ecc.), dato che deriva da una query Overpass
-        mirata a questo tipo di strutture.
-
-        Parameters
-        ----------
-        dataset:
-            DataFrame con almeno le colonne ``cod_istat`` e ``comune``.
-        nightlife_tsv_path:
-            Percorso al TSV dei locali per la vita notturna (da OSM/Overpass).
-
-        Returns
-        -------
-        pd.DataFrame
-            Dataset originale con la colonna aggiuntiva ``nightlife``
-            (int, 0 per i comuni senza strutture).
-        """
-        if self._comuni_shp_path is None:
-            raise RuntimeError(
-                "Shapefile dei comuni non disponibile. "
-                "Chiama load_municipalities() prima di add_nightlife()."
-            )
-
-        nightlife_tsv_path = Path(nightlife_tsv_path)
-        if not nightlife_tsv_path.exists():
-            raise FileNotFoundError(
-                f"TSV locali vita notturna non trovato: {nightlife_tsv_path}"
-            )
-
-        # carica i confini comunali in CRS metrico
-        comuni = gpd.read_file(self._comuni_shp_path).to_crs(METRIC_CRS)
-
-        # carica il TSV dei locali per la vita notturna
-        nightlife_df = pd.read_csv(
-            nightlife_tsv_path, sep="\t", dtype={"@id": str}
-        )
-
-        required_cols = {"@lat", "@lon"}
-        missing_cols = required_cols - set(nightlife_df.columns)
-        if missing_cols:
-            raise ValueError(
-                f"Colonne mancanti nel TSV locali vita notturna: {sorted(missing_cols)}"
-            )
-
-        # rimuove righe senza coordinate valide
-        nightlife_df = nightlife_df.dropna(subset=["@lat", "@lon"])
-        nightlife_df["@lat"] = pd.to_numeric(nightlife_df["@lat"], errors="coerce")
-        nightlife_df["@lon"] = pd.to_numeric(nightlife_df["@lon"], errors="coerce")
-        nightlife_df = nightlife_df.dropna(subset=["@lat", "@lon"])
-
-        if nightlife_df.empty:
-            raise ValueError(
-                "Il TSV dei locali per la vita notturna non contiene record validi "
-                "con coordinate valide."
-            )
-
-        # costruisce le geometrie puntuali (lon, lat)
-        geometry = gpd.points_from_xy(nightlife_df["@lon"], nightlife_df["@lat"])
-        keep_cols = [
-            c
-            for c in ["@id", "amenity", "name"]
-            if c in nightlife_df.columns
-        ] or ["@id"]
-        nightlife_gdf = gpd.GeoDataFrame(
-            nightlife_df[keep_cols],
-            geometry=geometry,
-            crs="EPSG:4326",
-        )
-        nightlife_gdf = nightlife_gdf.to_crs(METRIC_CRS)
-
-        # spatial join: ogni locale → comune che lo contiene
-        joined = gpd.sjoin(
-            nightlife_gdf,
-            comuni[[COD_ISTAT_FIELD, "geometry"]],
-            how="left",
-            predicate="within",
-        )
-
-        # conta le strutture per comune
-        nightlife_per_comune = (
-            joined.groupby(COD_ISTAT_FIELD)
-            .size()
-            .reset_index(name="nightlife")
-            .rename(columns={COD_ISTAT_FIELD: "cod_istat"})
-        )
-        nightlife_per_comune["nightlife"] = nightlife_per_comune[
-            "nightlife"
-        ].astype(int)
-
-        # unisce al dataset originale
-        result = dataset.merge(nightlife_per_comune, on="cod_istat", how="left")
-        result["nightlife"] = result["nightlife"].fillna(0).astype(int)
-
-        return result
-    
-    def add_public_transport_points(
-        self,
-        dataset: pd.DataFrame,
-        public_transport_tsv_path: str | Path,
-    ) -> pd.DataFrame:
-        """Aggiunge/aggiorna nel dataset il conteggio dei punti di trasporto pubblico per comune.
-
-        A differenza di ``add_sport_facilities``, questo metodo è pensato per
-        essere chiamato più volte in sequenza (tipicamente una volta per
-        ciascun file Nord/Centro/Sud): ogni chiamata legge UN SOLO TSV,
-        conta i punti di trasporto pubblico per comune e SOMMA il risultato
-        alla colonna ``public_transport_points`` già presente nel dataset,
-        senza azzerare i conteggi ottenuti dalle chiamate precedenti.
-
-        Legge un TSV (tipicamente esportato da OSM/Overpass) con colonne
-        ``@id``, ``@lat``, ``@lon``, ``highway``, ``railway``,
-        ``public_transport``, ``name``. Come per gli impianti sportivi, non
-        si filtra per un singolo valore di tag: ogni record del TSV è già
-        considerato un punto di trasporto pubblico valido, dato che deriva
-        da una query Overpass che seleziona esclusivamente fermate/stazioni.
-
-        Parameters
-        ----------
-        dataset:
-            DataFrame con almeno le colonne ``cod_istat`` e ``comune``.
-            Se non contiene ancora la colonna ``public_transport_points``,
-            questa viene creata e inizializzata a 0.
-        public_transport_tsv_path:
-            Percorso al TSV dei punti di trasporto pubblico (da OSM/Overpass)
-            relativo a UNA sola area (es. solo Nord, solo Centro o solo Sud).
-
-        Returns
-        -------
-        pd.DataFrame
-            Dataset originale con la colonna ``public_transport_points``
-            (int) aggiornata sommando i conteggi del file passato a quelli
-            già presenti.
-        """
-        if self._comuni_shp_path is None:
-            raise RuntimeError(
-                "Shapefile dei comuni non disponibile. "
-                "Chiama load_municipalities() prima di add_public_transport_points()."
-            )
+        self._require_dataset("add_public_transport_points")
 
         public_transport_tsv_path = Path(public_transport_tsv_path)
         if not public_transport_tsv_path.exists():
@@ -1002,22 +497,15 @@ class OpenStreetMap:
                 f"TSV punti di trasporto pubblico non trovato: {public_transport_tsv_path}"
             )
 
-        # carica i confini comunali in CRS metrico
-        comuni = gpd.read_file(self._comuni_shp_path).to_crs(METRIC_CRS)
+        comuni = self._load_comuni_metric()
 
-        # carica il TSV dei punti di trasporto pubblico
-        transport_df = pd.read_csv(
-            public_transport_tsv_path, sep="\t", dtype={"@id": str}
-        )
+        transport_df = pd.read_csv(public_transport_tsv_path, sep="\t", dtype={"@id": str})
 
         required_cols = {"@lat", "@lon"}
         missing_cols = required_cols - set(transport_df.columns)
         if missing_cols:
-            raise ValueError(
-                f"Colonne mancanti nel TSV trasporto pubblico: {sorted(missing_cols)}"
-            )
+            raise ValueError(f"Colonne mancanti nel TSV trasporto pubblico: {sorted(missing_cols)}")
 
-        # rimuove righe senza coordinate valide
         transport_df = transport_df.dropna(subset=["@lat", "@lon"])
         transport_df["@lat"] = pd.to_numeric(transport_df["@lat"], errors="coerce")
         transport_df["@lon"] = pd.to_numeric(transport_df["@lon"], errors="coerce")
@@ -1025,29 +513,19 @@ class OpenStreetMap:
 
         if transport_df.empty:
             raise ValueError(
-                "Il TSV dei punti di trasporto pubblico non contiene record "
-                "validi con coordinate valide."
+                "Il TSV dei punti di trasporto pubblico non contiene record validi con coordinate valide."
             )
 
-        # costruisce le geometrie puntuali (lon, lat)
         geometry = gpd.points_from_xy(transport_df["@lon"], transport_df["@lat"])
         keep_cols = [c for c in ["@id", "name"] if c in transport_df.columns] or ["@id"]
         transport_gdf = gpd.GeoDataFrame(
-            transport_df[keep_cols],
-            geometry=geometry,
-            crs="EPSG:4326",
-        )
-        transport_gdf = transport_gdf.to_crs(METRIC_CRS)
+            transport_df[keep_cols], geometry=geometry, crs="EPSG:4326"
+        ).to_crs(METRIC_CRS)
 
-        # spatial join: ogni punto di trasporto pubblico → comune che lo contiene
         joined = gpd.sjoin(
-            transport_gdf,
-            comuni[[COD_ISTAT_FIELD, "geometry"]],
-            how="left",
-            predicate="within",
+            transport_gdf, comuni[[COD_ISTAT_FIELD, "geometry"]], how="left", predicate="within"
         )
 
-        # conta i punti per comune per QUESTO SOLO file
         points_per_comune = (
             joined.groupby(COD_ISTAT_FIELD)
             .size()
@@ -1058,24 +536,26 @@ class OpenStreetMap:
             "new_public_transport_points"
         ].astype(int)
 
-        # assicura che la colonna cumulativa esista già nel dataset
-        result = dataset.copy()
-        if "public_transport_points" not in result.columns:
-            result["public_transport_points"] = 0
+        if "public_transport_points" not in self.dataset.columns:
+            self.dataset["public_transport_points"] = 0
 
-        # unisce i nuovi conteggi e li SOMMA a quelli già presenti
-        result = result.merge(points_per_comune, on="cod_istat", how="left")
-        result["new_public_transport_points"] = (
-            result["new_public_transport_points"].fillna(0).astype(int)
+        self.dataset = self.dataset.merge(points_per_comune, on="cod_istat", how="left")
+        self.dataset["new_public_transport_points"] = (
+            self.dataset["new_public_transport_points"].fillna(0).astype(int)
         )
-        result["public_transport_points"] = (
-            result["public_transport_points"] + result["new_public_transport_points"]
+        self.dataset["public_transport_points"] = (
+            self.dataset["public_transport_points"] + self.dataset["new_public_transport_points"]
         ).astype(int)
-        result = result.drop(columns=["new_public_transport_points"])
+        self.dataset = self.dataset.drop(columns=["new_public_transport_points"])
+        return self
 
-        return result
+    # ------------------------------------------------------------------
+    # Output
+    # ------------------------------------------------------------------
 
-    def save_to_csv(self, dataset: pd.DataFrame, output_csv_path: str | Path) -> None:
+    def save_to_csv(self, output_csv_path: str | Path) -> "OpenStreetMap":
+        self._require_dataset("save_to_csv")
         output_csv_path = Path(output_csv_path)
         output_csv_path.parent.mkdir(parents=True, exist_ok=True)
-        dataset.to_csv(output_csv_path, index=False, encoding="utf-8")
+        self.dataset.to_csv(output_csv_path, index=False, encoding="utf-8")
+        return self
