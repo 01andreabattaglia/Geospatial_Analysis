@@ -215,6 +215,88 @@ class ISTAT:
         result["_join_key"] = pd.to_numeric(result["cod_istat"], errors="coerce")
         result = result.merge(tourism, on="_join_key", how="left").drop(columns="_join_key")
         return result
+    
+    def add_population(
+        self,
+        dataset: pd.DataFrame,
+        population_csv_path: str | Path,
+    ) -> pd.DataFrame:
+        """
+        Aggiunge al dataset in input la popolazione residente totale del comune
+        (fonte ISTAT - Popolazione residente per età, sesso e stato civile),
+        facendo il join sul codice ISTAT del comune.
+
+        Colonna aggiunta:
+        - total_population
+        """
+        population_csv_path = Path(population_csv_path)
+        if not population_csv_path.exists():
+            raise FileNotFoundError(
+                f"CSV popolazione non trovato: {population_csv_path}"
+            )
+
+        POP_KEY_FIELD = "Codice comune"
+        POP_ETA_FIELD = "Età"
+        POP_TOTALE_FIELD = "Totale"
+        POP_ETA_TOTALE = 999
+
+        # La prima riga del file è un titolo descrittivo (non l'header delle
+        # colonne), quindi la saltiamo con skiprows=1. Tutti i campi sono tra
+        # virgolette e separati da ';'.
+        pop_df = pd.read_csv(
+            population_csv_path,
+            sep=";",
+            skiprows=1,
+            dtype=str,
+            encoding="utf-8",
+        )
+
+        missing = [
+            c for c in (POP_KEY_FIELD, POP_ETA_FIELD, POP_TOTALE_FIELD)
+            if c not in pop_df.columns
+        ]
+        if missing:
+            raise ValueError(
+                f"Colonne attese non trovate nel CSV popolazione: {missing}. "
+                f"Colonne disponibili: {list(pop_df.columns)}"
+            )
+
+        # L'età arriva come stringa (es. "999"): la convertiamo per poter
+        # filtrare sulla riga di totale.
+        eta_numeric = pd.to_numeric(pop_df[POP_ETA_FIELD], errors="coerce")
+        totals = pop_df[eta_numeric == POP_ETA_TOTALE].copy()
+        if totals.empty:
+            raise ValueError(
+                f"Nessuna riga con Età = {POP_ETA_TOTALE} trovata nel CSV popolazione."
+            )
+
+        def _to_number(v) -> float:
+            s = "" if pd.isna(v) else str(v).strip()
+            if s in ("", "-", "–", "—"):
+                return 0.0
+            s = s.replace(".", "").replace(",", ".")
+            try:
+                return float(s)
+            except ValueError:
+                return 0.0
+
+        population = pd.DataFrame(
+            {
+                # Il codice comune è alfanumerico con zero iniziali (es. "028001"):
+                # per il join lo normalizziamo a numero, come per gli altri join.
+                "_join_key": pd.to_numeric(totals[POP_KEY_FIELD], errors="coerce"),
+                "total_population": totals[POP_TOTALE_FIELD].map(_to_number),
+            }
+        )
+
+        # Se per lo stesso comune ci fossero più righe di totale (non dovrebbe
+        # succedere ma per sicurezza), teniamo l'ultima.
+        population = population.drop_duplicates(subset="_join_key", keep="last")
+
+        result = dataset.copy()
+        result["_join_key"] = pd.to_numeric(result["cod_istat"], errors="coerce")
+        result = result.merge(population, on="_join_key", how="left").drop(columns="_join_key")
+        return result
 
     def save_to_csv(self, dataset: pd.DataFrame, output_csv_path: str | Path) -> None:
         output_csv_path = Path(output_csv_path)
