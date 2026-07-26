@@ -83,6 +83,54 @@ class DatasetManager:
         result["presenze_totali"] = result["presenze_totali"].astype("Int64")
 
         return result
+    
+    def add_extra_features(self, dataset: pd.DataFrame, csv_path: str) -> pd.DataFrame:
+        """
+        Legge un CSV generico con formato:
+        cod_istat, comune, <colonne extra...>
+
+        Aggancia tutte le colonne tranne le prime due (cod_istat, comune)
+        al dataset esistente, effettuando il join su id_comune / cod_istat.
+        """
+        print(f"Lettura del file: {csv_path}...")
+
+        try:
+            df_extra = pd.read_csv(csv_path)
+
+            if df_extra.shape[1] < 3:
+                raise ValueError("Il file deve contenere almeno 3 colonne (cod_istat, comune, + almeno una colonna extra)")
+
+            # prima colonna = chiave di join, seconda = nome comune (scartata),
+            # tutte le restanti = colonne da agganciare
+            key_col = df_extra.columns[0]
+            extra_cols = list(df_extra.columns[2:])
+
+            df_extra = df_extra[[key_col] + extra_cols].copy()
+            df_extra = df_extra.rename(columns={key_col: "cod_istat"})
+
+            # normalizzazione chiave di join lato file esterno
+            df_extra["cod_istat"] = (
+                df_extra["cod_istat"]
+                .astype(str)
+                .str.extract(r"(\d+)")[0]
+                .str.zfill(6)
+            )
+
+        except Exception as e:
+            raise ValueError(f"Si è verificato un errore durante la lettura del file CSV: {e}")
+
+        # normalizzazione chiave di join lato dataset comuni
+        dataset = dataset.copy()
+        dataset["id_comune"] = dataset["id_comune"].astype(str).str.zfill(6)
+
+        result = dataset.merge(
+            df_extra,
+            left_on="id_comune",
+            right_on="cod_istat",
+            how="left"
+        ).drop(columns=["cod_istat"])
+
+        return result
         
     def save_to_csv(self, df: pd.DataFrame, output_path: str, index: bool = False, encoding: str = "utf-8") -> None:
         """

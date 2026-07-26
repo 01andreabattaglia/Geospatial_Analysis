@@ -1,4 +1,4 @@
-cod_istat,comune,km_costa_mare,km_costa_lago,kmq_aree_protette,museums,architectural_features,sports_facilities,nature_based,theme_parks,nightlife,public_transport_points,airport_straight_km
+istat_code,municipality,sea_coast_km,lake_coast_km,protected_areas_sqkm,museums,architectural_features,sports_facilities,nature_based,theme_parks,nightlife,public_transport_points,airport_straight_km
 1001,Agliè,0.0,0.432,3.056,0,4,8,4,0,0,11,20.818
 1002,Airasca,0.0,0.172,0.0,0,0,11,1,0,1,5,33.66
 1003,Ala di Stura,0.0,0.387,0.0,0,1,18,25,0,1,0,31.289
