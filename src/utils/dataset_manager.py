@@ -3,144 +3,191 @@ import pandas as pd
 
 
 class DatasetManager:
+    """Each `add_*` method works on the internal `self.dataset` dataset.
+
+    Typical usage::
+
+        manager = DatasetManager()
+        manager.load_municipalities(path_dbf)
+        manager.add_tourism_data(path_xlsx)
+        manager.add_extra_features(path_csv)
+        manager.save_to_csv(path_csv)
+
+    There is no longer any need to pass/reassign the DataFrame between one
+    method and the next: each one reads and updates `self.dataset` in-place
+    and returns `self`, so calls can also be chained if desired, but this
+    is not mandatory.
+    """
+
     def __init__(self, encoding="utf-8"):
         """
-        encoding: utile per gestire caratteri accentati nei DBF
+        encoding: useful for handling accented characters in the DBF files
         """
         self.encoding = encoding
+        self.dataset: pd.DataFrame | None = None
 
-    def load_comuni(self, dbf_path: str) -> pd.DataFrame:
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _require_dataset(self, caller_name: str) -> None:
+        if self.dataset is None:
+            raise RuntimeError(
+                f"Dataset not initialized. Call load_municipalities() before {caller_name}()."
+            )
+
+    # ------------------------------------------------------------------
+    # Base loading
+    # ------------------------------------------------------------------
+
+    def load_municipalities(self, dbf_path: str) -> "DatasetManager":
 
         table = DBF(dbf_path, encoding=self.encoding, load=True)
         df = pd.DataFrame(iter(table))
 
-        # normalizzazione
+        # normalization
         df.columns = [c.lower() for c in df.columns]
 
         df["cod_prov"] = df["cod_prov"].astype(str).str.zfill(3)
         df["comune"] = df["comune"].astype(str).str.strip()
 
-        # mapping: DBF → nome finale
+        # mapping: DBF field → final name
         rename_map = {
-            "cod_prov": "cod_prov",
-            "pro_com_t": "id_comune",
-            "comune": "nome_comune"
+            "cod_prov": "province_code",
+            "pro_com_t": "municipality_id",
+            "comune": "municipality_name",
         }
 
         missing = [c for c in rename_map if c not in df.columns]
         if missing:
-            raise ValueError(f"Colonne mancanti nel DBF: {missing}")
+            raise ValueError(f"Missing columns in the DBF: {missing}")
 
         result = df.rename(columns=rename_map)[list(rename_map.values())].copy()
 
-        return result
-    
-    def add_tourism_data(self, dataset: pd.DataFrame, excel_path: str) -> pd.DataFrame:
+        self.dataset = result
+        return self
+
+    # ------------------------------------------------------------------
+    # Methods that attach new columns to self.dataset
+    # ------------------------------------------------------------------
+
+    def add_tourism_data(self, excel_path: str) -> "DatasetManager":
         """
-        Legge il file Excel ISTAT (foglio '2024'), estrae cod.istat,
-        nome comune e presenze non residenti, ed esegue il join
-        con il dataset dei comuni su id_comune / cod_istat.
+        Reads the ISTAT Excel file (sheet '2024'), extracts the ISTAT code,
+        municipality name, and non-resident overnight stays, and performs
+        the join with the municipalities dataset on municipality_id / istat_code.
         """
-        print(f"Lettura del file: {excel_path} (potrebbe richiedere qualche secondo)...")
+        self._require_dataset("add_tourism_data")
+
+        print(f"Reading file: {excel_path} (this may take a few seconds)...")
 
         try:
             df = pd.read_excel(excel_path, sheet_name="2024", skiprows=6, header=None)
 
-            # Indice 5: Cod. Istat
-            # Indice 19: Presenze / Totale esercizi / Totali
+            # Index 5: Cod. Istat
+            # Index 19: Overnight stays / Total establishments / Totals
             df_filtered = df[[5, 19]].copy()
-            df_filtered.columns = ["cod_istat", "presenze_totali"]
+            df_filtered.columns = ["istat_code", "total_overnight_stays"]
 
-            df_filtered = df_filtered.dropna(subset=["cod_istat"])
+            df_filtered = df_filtered.dropna(subset=["istat_code"])
 
-            df_filtered["presenze_totali"] = (
-                pd.to_numeric(df_filtered["presenze_totali"], errors="coerce")
+            df_filtered["total_overnight_stays"] = (
+                pd.to_numeric(df_filtered["total_overnight_stays"], errors="coerce")
                 .fillna(0)
                 .round(0)
                 .astype(int)
             )
 
-            df_filtered["cod_istat"] = df_filtered["cod_istat"].apply(
+            df_filtered["istat_code"] = df_filtered["istat_code"].apply(
                 lambda x: str(int(x)).zfill(6)
                 if pd.notnull(x) and str(x).replace(".", "").isdigit()
                 else str(x)
             )
 
         except Exception as e:
-            raise ValueError(f"Si è verificato un errore durante l'estrazione del file Excel: {e}")
+            raise ValueError(f"An error occurred while extracting the Excel file: {e}")
 
-        # normalizzazione chiave di join lato dataset comuni
-        dataset = dataset.copy()
-        dataset["id_comune"] = dataset["id_comune"].astype(str).str.zfill(6)
+        # normalize the join key on the municipalities dataset side
+        dataset = self.dataset.copy()
+        dataset["municipality_id"] = dataset["municipality_id"].astype(str).str.zfill(6)
 
         result = dataset.merge(
-            df_filtered[["cod_istat", "presenze_totali"]],
-            left_on="id_comune",
-            right_on="cod_istat",
+            df_filtered[["istat_code", "total_overnight_stays"]],
+            left_on="municipality_id",
+            right_on="istat_code",
             how="left"
-        ).drop(columns=["cod_istat"])
+        ).drop(columns=["istat_code"])
 
-        result["presenze_totali"] = result["presenze_totali"].astype("Int64")
+        result["total_overnight_stays"] = result["total_overnight_stays"].astype("Int64")
 
-        return result
-    
-    def add_extra_features(self, dataset: pd.DataFrame, csv_path: str) -> pd.DataFrame:
+        self.dataset = result
+        return self
+
+    def add_extra_features(self, csv_path: str) -> "DatasetManager":
         """
-        Legge un CSV generico con formato:
-        cod_istat, comune, <colonne extra...>
+        Reads a generic CSV with the format:
+        istat_code, municipality_name, <extra columns...>
 
-        Aggancia tutte le colonne tranne le prime due (cod_istat, comune)
-        al dataset esistente, effettuando il join su id_comune / cod_istat.
+        Attaches all columns except the first two (istat_code, municipality_name)
+        to the existing dataset, performing the join on municipality_id / istat_code.
         """
-        print(f"Lettura del file: {csv_path}...")
+        self._require_dataset("add_extra_features")
+
+        print(f"Reading file: {csv_path}...")
 
         try:
             df_extra = pd.read_csv(csv_path)
 
             if df_extra.shape[1] < 3:
-                raise ValueError("Il file deve contenere almeno 3 colonne (cod_istat, comune, + almeno una colonna extra)")
+                raise ValueError("The file must contain at least 3 columns (istat_code, municipality_name, + at least one extra column)")
 
-            # prima colonna = chiave di join, seconda = nome comune (scartata),
-            # tutte le restanti = colonne da agganciare
+            # first column = join key, second = municipality name (discarded),
+            # all remaining columns = columns to attach
             key_col = df_extra.columns[0]
             extra_cols = list(df_extra.columns[2:])
 
             df_extra = df_extra[[key_col] + extra_cols].copy()
-            df_extra = df_extra.rename(columns={key_col: "cod_istat"})
+            df_extra = df_extra.rename(columns={key_col: "istat_code"})
 
-            # normalizzazione chiave di join lato file esterno
-            df_extra["cod_istat"] = (
-                df_extra["cod_istat"]
+            # normalize the join key on the external file side
+            df_extra["istat_code"] = (
+                df_extra["istat_code"]
                 .astype(str)
                 .str.extract(r"(\d+)")[0]
                 .str.zfill(6)
             )
 
         except Exception as e:
-            raise ValueError(f"Si è verificato un errore durante la lettura del file CSV: {e}")
+            raise ValueError(f"An error occurred while reading the CSV file: {e}")
 
-        # normalizzazione chiave di join lato dataset comuni
-        dataset = dataset.copy()
-        dataset["id_comune"] = dataset["id_comune"].astype(str).str.zfill(6)
+        # normalize the join key on the municipalities dataset side
+        dataset = self.dataset.copy()
+        dataset["municipality_id"] = dataset["municipality_id"].astype(str).str.zfill(6)
 
         result = dataset.merge(
             df_extra,
-            left_on="id_comune",
-            right_on="cod_istat",
+            left_on="municipality_id",
+            right_on="istat_code",
             how="left"
-        ).drop(columns=["cod_istat"])
+        ).drop(columns=["istat_code"])
 
-        return result
-        
-    def save_to_csv(self, df: pd.DataFrame, output_path: str, index: bool = False, encoding: str = "utf-8") -> None:
+        self.dataset = result
+        return self
+
+    # ------------------------------------------------------------------
+    # Output
+    # ------------------------------------------------------------------
+
+    def save_to_csv(self, output_path: str, index: bool = False, encoding: str = "utf-8") -> "DatasetManager":
         """
-        Salva il dataset in CSV.
+        Saves the dataset to CSV.
 
         Parameters:
-        - df: DataFrame da salvare
-        - output_path: percorso del file CSV
-        - index: se includere l'indice
-        - encoding: default utf-8 (consigliato)
+        - output_path: path of the CSV file
+        - index: whether to include the index
+        - encoding: default utf-8 (recommended)
         """
+        self._require_dataset("save_to_csv")
 
-        df.to_csv(output_path, index=index, encoding=encoding)
+        self.dataset.to_csv(output_path, index=index, encoding=encoding)
+        return self

@@ -1,4 +1,4 @@
-cod_prov,id_comune,nome_comune,presenze_totali,comune_isolano,zona_altimetrica,posti_letto_alberghieri_totale,posti_letto_extra_alberghieri_totale,qualita_offerta_alberghiera_pct,total_population,km_costa_mare,km_costa_lago,kmq_aree_protette,museums,architectural_features,sports_facilities,nature_based,theme_parks,nightlife,public_transport_points,airport_straight_km,siti_unesco,n_siti_unesco
+province_code,municipality_id,municipality_name,total_overnight_stays,island_municipality,altitude_zone,total_hotel_beds,total_non_hotel_beds,high_end_hotel_beds_pct,total_population,sea_coast_km,lake_coast_km,protected_areas_sqkm,museums,architectural_features,sports_facilities,nature_based,theme_parks,nightlife,public_transport_points,airport_straight_km,unesco_sites,n_unesco_sites
 001,001001,Agliè,494,0,3,0.0,82.0,0.0,2596.0,0.0,0.432,3.056,0,4,8,4,0,0,11,20.818,,0
 001,001002,Airasca,,0,5,0.0,12.0,0.0,3686.0,0.0,0.172,0.0,0,0,11,1,0,1,5,33.66,,0
 001,001003,Ala di Stura,6690,0,1,106.0,78.0,0.0,472.0,0.0,0.387,0.0,0,1,18,25,0,1,0,31.289,,0

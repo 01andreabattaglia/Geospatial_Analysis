@@ -1,6 +1,6 @@
 from .utils.openstreetmap_manager import OpenStreetMap
 
-if __name__ == "__main__":
+def prepare_openstreetmap_data():
     osm = OpenStreetMap()
     osm.load_municipalities("data/input/ISTAT/Com01012024_g/Com01012024_g_WGS84.shp")
     osm.add_sea_coast_line("data/input/OpenStreetMap/coast_line.geojson")
@@ -18,3 +18,6 @@ if __name__ == "__main__":
     osm.add_airport_straight_distance("data/input/OpenStreetMap/public_airports.tsv")
 
     osm.save_to_csv("data/output/osm_dataset.csv")
+
+if __name__ == "__main__":
+    prepare_openstreetmap_data()
