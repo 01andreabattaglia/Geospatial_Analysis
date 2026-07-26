@@ -7,14 +7,14 @@ import pandas as pd
 from shapely.geometry import Point
 
 METRIC_CRS = "EPSG:32632"
-COD_ISTAT_FIELD = "PRO_COM"
-COMUNE_NAME_FIELD = "COMUNE"
+ISTAT_CODE_FIELD = "PRO_COM"
+MUNICIPALITY_NAME_FIELD = "COMUNE"
 COORDINATES_FIELD = "Coordinates"
 UNESCO_NAME_FIELD = "Name EN"
 
 
 def _parse_coordinates(coord_str) -> tuple[float, float] | None:
-    """Converte una stringa 'lat, lon' nel dataset UNESCO in una tupla (lat, lon)."""
+    """Converts a 'lat, lon' string from the UNESCO dataset into a (lat, lon) tuple."""
     if coord_str is None or (isinstance(coord_str, float) and pd.isna(coord_str)):
         return None
     try:
@@ -25,57 +25,89 @@ def _parse_coordinates(coord_str) -> tuple[float, float] | None:
 
 
 class OtherSources:
+    """Each `add_*` method works on the internal `self.dataset` dataset.
+
+    Typical usage::
+
+        other_sources = OtherSources()
+        other_sources.load_municipalities(path_shp)
+        other_sources.add_UNESCO_sites(path_csv)
+        other_sources.save_to_csv(path_csv)
+
+    There is no longer any need to pass/reassign the DataFrame between one
+    method and the next: each one reads and updates `self.dataset` in-place
+    and returns `self`, so calls can also be chained if desired, but this
+    is not mandatory.
+    """
 
     def __init__(self) -> None:
-        self._comuni_shp_path: Path | None = None
+        self._municipalities_shp_path: Path | None = None
+        self.dataset: pd.DataFrame | None = None
 
-    def load_municipalities(self, comuni_shp_path: str | Path) -> pd.DataFrame:
-        comuni_shp_path = Path(comuni_shp_path)
-        if not comuni_shp_path.exists():
-            raise FileNotFoundError(f"Shapefile comuni non trovato: {comuni_shp_path}")
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
 
-        gdf = gpd.read_file(comuni_shp_path)
+    def _require_dataset(self, caller_name: str) -> None:
+        if self.dataset is None or self._municipalities_shp_path is None:
+            raise RuntimeError(
+                f"Dataset not initialized. Call load_municipalities() before {caller_name}()."
+            )
 
-        missing = [c for c in (COD_ISTAT_FIELD, COMUNE_NAME_FIELD) if c not in gdf.columns]
+    # ------------------------------------------------------------------
+    # Base loading
+    # ------------------------------------------------------------------
+
+    def load_municipalities(self, municipalities_shp_path: str | Path) -> "OtherSources":
+        municipalities_shp_path = Path(municipalities_shp_path)
+        if not municipalities_shp_path.exists():
+            raise FileNotFoundError(f"Municipalities shapefile not found: {municipalities_shp_path}")
+
+        gdf = gpd.read_file(municipalities_shp_path)
+
+        missing = [c for c in (ISTAT_CODE_FIELD, MUNICIPALITY_NAME_FIELD) if c not in gdf.columns]
         if missing:
             raise ValueError(
-                f"Campi attesi non trovati nello shapefile: {missing}. "
-                f"Colonne disponibili: {list(gdf.columns)}"
+                f"Expected fields not found in the shapefile: {missing}. "
+                f"Available columns: {list(gdf.columns)}"
             )
 
         if gdf.crs is None:
-            raise ValueError("Lo shapefile non ha un CRS definito (controlla il file .prj).")
+            raise ValueError("The shapefile does not have a defined CRS (check the .prj file).")
 
-        self._comuni_shp_path = comuni_shp_path
+        self._municipalities_shp_path = municipalities_shp_path
 
         df = pd.DataFrame(gdf.drop(columns="geometry"))
-        return df.select_dtypes(include=["number", "object"])
+        self.dataset = df.select_dtypes(include=["number", "object"])
+        return self
+
+    # ------------------------------------------------------------------
+    # Methods that attach new columns to self.dataset
+    # ------------------------------------------------------------------
 
     def add_UNESCO_sites(
         self,
-        municipalities: pd.DataFrame,
         unesco_csv_path: str | Path,
-    ) -> pd.DataFrame:
+    ) -> "OtherSources":
+        self._require_dataset("add_UNESCO_sites")
+
         unesco_csv_path = Path(unesco_csv_path)
         if not unesco_csv_path.exists():
-            raise FileNotFoundError(f"CSV siti UNESCO non trovato: {unesco_csv_path}")
+            raise FileNotFoundError(f"UNESCO sites CSV not found: {unesco_csv_path}")
 
-        if self._comuni_shp_path is None:
-            raise ValueError("Shapefile comuni non caricato. Chiama prima load_municipalities().")
+        # Reload the geometry from the shapefile for internal use
+        municipalities_gdf = gpd.read_file(self._municipalities_shp_path)
+        municipalities = municipalities_gdf[[ISTAT_CODE_FIELD, MUNICIPALITY_NAME_FIELD, "geometry"]].to_crs(METRIC_CRS)
 
-        # Ricarica la geometria dallo shapefile per uso interno
-        gdf_comuni = gpd.read_file(self._comuni_shp_path)
-        comuni = gdf_comuni[[COD_ISTAT_FIELD, COMUNE_NAME_FIELD, "geometry"]].to_crs(METRIC_CRS)
-
-        # Filtra solo i comuni presenti nel DataFrame in input
-        comuni = comuni[comuni[COD_ISTAT_FIELD].isin(municipalities[COD_ISTAT_FIELD])]
+        # Filter only the municipalities present in the input dataset
+        municipalities = municipalities[municipalities[ISTAT_CODE_FIELD].isin(self.dataset[ISTAT_CODE_FIELD])]
 
         unesco = pd.read_csv(unesco_csv_path)
 
         if COORDINATES_FIELD not in unesco.columns:
             raise ValueError(
-                f"Campo '{COORDINATES_FIELD}' non trovato nel CSV UNESCO. "
-                f"Colonne disponibili: {list(unesco.columns)}"
+                f"Field '{COORDINATES_FIELD}' not found in the UNESCO CSV. "
+                f"Available columns: {list(unesco.columns)}"
             )
 
         name_field = UNESCO_NAME_FIELD if UNESCO_NAME_FIELD in unesco.columns else unesco.columns[0]
@@ -87,48 +119,58 @@ class OtherSources:
         lat = parsed_coords.apply(lambda t: t[0])
         lon = parsed_coords.apply(lambda t: t[1])
 
-        gdf_unesco = gpd.GeoDataFrame(
-            unesco[[name_field]].rename(columns={name_field: "nome_sito_unesco"}),
+        unesco_gdf = gpd.GeoDataFrame(
+            unesco[[name_field]].rename(columns={name_field: "unesco_site_name"}),
             geometry=[Point(x, y) for x, y in zip(lon, lat)],
             crs="EPSG:4326",
         )
-        gdf_unesco = gdf_unesco.to_crs(METRIC_CRS)
+        unesco_gdf = unesco_gdf.to_crs(METRIC_CRS)
 
-        # Left join spaziale: punti UNESCO che ricadono nei confini dei comuni
+        # Spatial inner join: UNESCO points falling within municipality boundaries
         joined = gpd.sjoin(
-            gdf_unesco,
-            comuni[[COD_ISTAT_FIELD, COMUNE_NAME_FIELD, "geometry"]],
+            unesco_gdf,
+            municipalities[[ISTAT_CODE_FIELD, MUNICIPALITY_NAME_FIELD, "geometry"]],
             how="inner",
             predicate="within",
         )
 
-        # Il conteggio va calcolato PRIMA di trasformare i nomi in un'unica stringa:
-        # alcuni nomi di siti UNESCO contengono virgole al loro interno
-        # (es. "Cathedral, Torre Civica and Piazza Grande, Modena" e' UN solo sito),
-        # quindi non si puo' ricavare il conteggio ri-splittando la stringa unita.
-        sites_per_comune = (
-            joined.groupby([COD_ISTAT_FIELD, COMUNE_NAME_FIELD])
+        # The count must be computed BEFORE turning the names into a single
+        # string: some UNESCO site names contain commas within them
+        # (e.g. "Cathedral, Torre Civica and Piazza Grande, Modena" is ONE
+        # single site), so the count cannot be derived by re-splitting the
+        # joined string.
+        sites_per_municipality = (
+            joined.groupby([ISTAT_CODE_FIELD, MUNICIPALITY_NAME_FIELD])
             .agg(
-                siti_unesco=(
-                    "nome_sito_unesco",
+                unesco_sites=(
+                    "unesco_site_name",
                     lambda names: "; ".join(sorted(set(names))),
                 ),
-                n_siti_unesco=("nome_sito_unesco", "nunique"),
+                n_unesco_sites=("unesco_site_name", "nunique"),
             )
             .reset_index()
         )
 
-        result = municipalities[[COD_ISTAT_FIELD, COMUNE_NAME_FIELD]].merge(
-            sites_per_comune, on=[COD_ISTAT_FIELD, COMUNE_NAME_FIELD], how="left"
+        result = self.dataset[[ISTAT_CODE_FIELD, MUNICIPALITY_NAME_FIELD]].merge(
+            sites_per_municipality, on=[ISTAT_CODE_FIELD, MUNICIPALITY_NAME_FIELD], how="left"
         )
-        result["siti_unesco"] = result["siti_unesco"].fillna("")
-        result["n_siti_unesco"] = result["n_siti_unesco"].fillna(0).astype(int)
+        result["unesco_sites"] = result["unesco_sites"].fillna("")
+        result["n_unesco_sites"] = result["n_unesco_sites"].fillna(0).astype(int)
 
-        return result.rename(
-            columns={COD_ISTAT_FIELD: "cod_istat", COMUNE_NAME_FIELD: "comune"}
-        ).sort_values("cod_istat").reset_index(drop=True)
-    
-    def save_to_csv(self, dataset: pd.DataFrame, output_csv_path: str | Path) -> None:
+        self.dataset = (
+            result.rename(columns={ISTAT_CODE_FIELD: "istat_code", MUNICIPALITY_NAME_FIELD: "municipality"})
+            .sort_values("istat_code")
+            .reset_index(drop=True)
+        )
+        return self
+
+    # ------------------------------------------------------------------
+    # Output
+    # ------------------------------------------------------------------
+
+    def save_to_csv(self, output_csv_path: str | Path) -> "OtherSources":
+        self._require_dataset("save_to_csv")
         output_csv_path = Path(output_csv_path)
         output_csv_path.parent.mkdir(parents=True, exist_ok=True)
-        dataset.to_csv(output_csv_path, index=False, encoding="utf-8")
+        self.dataset.to_csv(output_csv_path, index=False, encoding="utf-8")
+        return self
