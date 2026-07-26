@@ -1,4 +1,4 @@
-cod_istat,comune,comune_isolano,zona_altimetrica,posti_letto_alberghieri_totale,posti_letto_extra_alberghieri_totale,qualita_offerta_alberghiera_pct,total_population
+istat_code,municipality,island_municipality,altitude_zone,total_hotel_beds,total_non_hotel_beds,high_end_hotel_beds_pct,total_population
 1001,Agliè,0,3,0.0,82.0,0.0,2596.0
 1002,Airasca,0,5,0.0,12.0,0.0,3686.0
 1003,Ala di Stura,0,1,106.0,78.0,0.0,472.0

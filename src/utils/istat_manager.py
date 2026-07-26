@@ -6,109 +6,167 @@ import geopandas as gpd
 import pandas as pd
 
 METRIC_CRS = "EPSG:32632"
-COD_ISTAT_FIELD = "PRO_COM"
-COMUNE_NAME_FIELD = "COMUNE"
+ISTAT_CODE_FIELD = "PRO_COM"
+MUNICIPALITY_NAME_FIELD = "COMUNE"
 
 
 class ISTAT:
+    """Each `add_*` method works on the internal `self.dataset` dataset.
 
-    def load_municipalities(self, comuni_shp_path: str | Path) -> pd.DataFrame:
-        comuni_shp_path = Path(comuni_shp_path)
-        if not comuni_shp_path.exists():
-            raise FileNotFoundError(f"Shapefile comuni non trovato: {comuni_shp_path}")
+    Typical usage::
 
-        gdf = gpd.read_file(comuni_shp_path)
+        istat = ISTAT()
+        istat.load_municipalities(path_shp)
+        istat.add_territory_characteristics(path_csv)
+        istat.add_tourism_infrastructure(path_xlsx)
+        istat.add_population(path_csv)
+        istat.save_to_csv(path_csv)
 
-        missing = [c for c in (COD_ISTAT_FIELD, COMUNE_NAME_FIELD) if c not in gdf.columns]
+    There is no longer any need to pass/reassign the DataFrame between one
+    method and the next: each one reads and updates `self.dataset` in-place
+    and returns `self`, so calls can also be chained if desired, but this
+    is not mandatory.
+    """
+
+    def __init__(self) -> None:
+        self.dataset: pd.DataFrame | None = None
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _require_dataset(self, caller_name: str) -> None:
+        if self.dataset is None:
+            raise RuntimeError(
+                f"Dataset not initialized. Call load_municipalities() before {caller_name}()."
+            )
+
+    @staticmethod
+    def _to_number(v) -> float:
+        s = "" if pd.isna(v) else str(v).strip()
+        if s in ("", "-", "–", "—"):
+            return 0.0
+        s = s.replace(".", "").replace(",", ".")
+        try:
+            return float(s)
+        except ValueError:
+            return 0.0
+
+    # ------------------------------------------------------------------
+    # Base loading
+    # ------------------------------------------------------------------
+
+    def load_municipalities(self, municipalities_shp_path: str | Path) -> "ISTAT":
+        municipalities_shp_path = Path(municipalities_shp_path)
+        if not municipalities_shp_path.exists():
+            raise FileNotFoundError(f"Municipalities shapefile not found: {municipalities_shp_path}")
+
+        gdf = gpd.read_file(municipalities_shp_path)
+
+        missing = [c for c in (ISTAT_CODE_FIELD, MUNICIPALITY_NAME_FIELD) if c not in gdf.columns]
         if missing:
             raise ValueError(
-                f"Campi attesi non trovati nello shapefile: {missing}. "
-                f"Colonne disponibili: {list(gdf.columns)}"
+                f"Expected fields not found in the shapefile: {missing}. "
+                f"Available columns: {list(gdf.columns)}"
             )
 
         if gdf.crs is None:
-            raise ValueError("Lo shapefile non ha un CRS definito (controlla il file .prj).")
+            raise ValueError("The shapefile does not have a defined CRS (check the .prj file).")
 
-        df = pd.DataFrame(gdf[[COD_ISTAT_FIELD, COMUNE_NAME_FIELD]])
-        return df.rename(columns={
-            COD_ISTAT_FIELD: "cod_istat",
-            COMUNE_NAME_FIELD: "comune",
+        df = pd.DataFrame(gdf[[ISTAT_CODE_FIELD, MUNICIPALITY_NAME_FIELD]])
+        self.dataset = df.rename(columns={
+            ISTAT_CODE_FIELD: "istat_code",
+            MUNICIPALITY_NAME_FIELD: "municipality",
         })
+        return self
+
+    # ------------------------------------------------------------------
+    # Methods that attach new columns to self.dataset
+    # ------------------------------------------------------------------
 
     def add_territory_characteristics(
         self,
-        municipalities: pd.DataFrame,
         characteristics_csv_path: str | Path,
-    ) -> pd.DataFrame:
+    ) -> "ISTAT":
+        self._require_dataset("add_territory_characteristics")
+
         characteristics_csv_path = Path(characteristics_csv_path)
         if not characteristics_csv_path.exists():
             raise FileNotFoundError(
-                f"CSV caratteristiche territorio non trovato: {characteristics_csv_path}"
+                f"Territory characteristics CSV not found: {characteristics_csv_path}"
             )
 
-        CHAR_KEY_FIELD = "Codice Comune (alfanumerico)"
-        CHAR_ISOLANO_FIELD = "Comune isolano"
-        CHAR_ZONA_ALT_FIELD = "Zona altimetrica"
+        CHARACTERISTICS_KEY_FIELD = "Codice Comune (alfanumerico)"
+        CHARACTERISTICS_ISLAND_FIELD = "Comune isolano"
+        CHARACTERISTICS_ALTITUDE_ZONE_FIELD = "Zona altimetrica"
 
-        istat_df = pd.read_csv(
+        characteristics_df = pd.read_csv(
             characteristics_csv_path,
             sep=";",
-            dtype={CHAR_KEY_FIELD: str},
+            dtype={CHARACTERISTICS_KEY_FIELD: str},
             encoding="utf-8",
         )
 
         missing = [
-            c for c in (CHAR_KEY_FIELD, CHAR_ISOLANO_FIELD, CHAR_ZONA_ALT_FIELD)
-            if c not in istat_df.columns
+            c for c in (CHARACTERISTICS_KEY_FIELD, CHARACTERISTICS_ISLAND_FIELD, CHARACTERISTICS_ALTITUDE_ZONE_FIELD)
+            if c not in characteristics_df.columns
         ]
         if missing:
             raise ValueError(
-                f"Colonne attese non trovate nel CSV: {missing}. "
-                f"Colonne disponibili: {list(istat_df.columns)}"
+                f"Expected columns not found in the CSV: {missing}. "
+                f"Available columns: {list(characteristics_df.columns)}"
             )
 
-        istat_lookup = istat_df[[CHAR_KEY_FIELD, CHAR_ISOLANO_FIELD, CHAR_ZONA_ALT_FIELD]].copy()
-        istat_lookup["_join_key"] = pd.to_numeric(istat_lookup[CHAR_KEY_FIELD], errors="coerce")
+        characteristics_lookup = characteristics_df[
+            [CHARACTERISTICS_KEY_FIELD, CHARACTERISTICS_ISLAND_FIELD, CHARACTERISTICS_ALTITUDE_ZONE_FIELD]
+        ].copy()
+        characteristics_lookup["_join_key"] = pd.to_numeric(
+            characteristics_lookup[CHARACTERISTICS_KEY_FIELD], errors="coerce"
+        )
 
-        result = municipalities.copy()
-        result["_join_key"] = pd.to_numeric(result["cod_istat"], errors="coerce")
+        result = self.dataset.copy()
+        result["_join_key"] = pd.to_numeric(result["istat_code"], errors="coerce")
 
         result = result.merge(
-            istat_lookup[["_join_key", CHAR_ISOLANO_FIELD, CHAR_ZONA_ALT_FIELD]],
+            characteristics_lookup[["_join_key", CHARACTERISTICS_ISLAND_FIELD, CHARACTERISTICS_ALTITUDE_ZONE_FIELD]],
             on="_join_key",
             how="left",
         ).drop(columns="_join_key")
 
-        return result.rename(columns={
-            CHAR_ISOLANO_FIELD: "comune_isolano",
-            CHAR_ZONA_ALT_FIELD: "zona_altimetrica",
-        })[["cod_istat", "comune", "comune_isolano", "zona_altimetrica"]]
-    
+        result = result.rename(columns={
+            CHARACTERISTICS_ISLAND_FIELD: "island_municipality",
+            CHARACTERISTICS_ALTITUDE_ZONE_FIELD: "altitude_zone",
+        })[["istat_code", "municipality", "island_municipality", "altitude_zone"]]
+
+        self.dataset = result
+        return self
+
     def add_tourism_infrastructure(
         self,
-        dataset: pd.DataFrame,
         accommodation_xlsx_path: str | Path,
         year: int = 2024,
-    ) -> pd.DataFrame:
+    ) -> "ISTAT":
         """
-        Aggiunge al dataset in input 3 colonne relative alla dotazione ricettiva
-        turistica del comune (fonte ISTAT - Capacità degli esercizi ricettivi),
-        facendo il join sul codice ISTAT del comune.
+        Adds 3 columns to the dataset related to the municipality's tourist
+        accommodation capacity (source: ISTAT - Capacity of accommodation
+        establishments), joining on the municipality's ISTAT code.
 
-        Colonne aggiunte:
-        - posti_letto_alberghieri_totale
-        - posti_letto_extra_alberghieri_totale
-        - qualita_offerta_alberghiera_pct
+        Columns added:
+        - total_hotel_beds
+        - total_non_hotel_beds
+        - high_end_hotel_beds_pct
         """
+        self._require_dataset("add_tourism_infrastructure")
+
         accommodation_xlsx_path = Path(accommodation_xlsx_path)
         if not accommodation_xlsx_path.exists():
             raise FileNotFoundError(
-                f"File capacità ricettiva non trovato: {accommodation_xlsx_path}"
+                f"Accommodation capacity file not found: {accommodation_xlsx_path}"
             )
 
         raw = pd.read_excel(accommodation_xlsx_path, header=None, dtype=str)
 
-        # 1. Trova la riga di misura (quella che contiene "Anno/Year" in colonna A)
+        # 1. Find the measure row (the one containing "Anno/Year" in column A)
         measure_row_idx = None
         for idx in range(min(15, len(raw))):
             first_cell = "" if pd.isna(raw.iat[idx, 0]) else str(raw.iat[idx, 0]).strip().lower()
@@ -117,15 +175,15 @@ class ISTAT:
                 break
         if measure_row_idx is None or measure_row_idx == 0:
             raise ValueError(
-                "Impossibile individuare la riga con 'Anno/Year' nel file."
+                "Unable to locate the row containing 'Anno/Year' in the file."
             )
 
         measure_row = raw.iloc[measure_row_idx]
 
-        # 2. Combina TUTTE le righe sopra la riga di misura (categoria + sottocategoria,
-        #    a prescindere da quante righe siano) applicando ffill per colonna, così
-        #    da recuperare il testo delle celle unite (che compaiono vuote in pandas
-        #    tranne che nella prima colonna del gruppo).
+        # 2. Combine ALL rows above the measure row (category + subcategory,
+        #    regardless of how many rows there are) applying ffill per column,
+        #    so as to recover the text of merged cells (which appear empty in
+        #    pandas except in the first column of the group).
         header_rows = raw.iloc[:measure_row_idx].ffill(axis=1)
         combined_header = header_rows.apply(
             lambda col: " ".join(str(v) for v in col if pd.notna(v)), axis=0
@@ -148,102 +206,96 @@ class ISTAT:
                     if "total" in combined_header.iat[col]
                 ]
                 raise ValueError(
-                    f"Colonna non trovata per header contenente '{header_keyword}' "
-                    f"e misura contenente '{measure_keyword}'. Colonne con 'total*' trovate: {debug}"
+                    f"No column found for header containing '{header_keyword}' "
+                    f"and measure containing '{measure_keyword}'. Columns with 'total*' found: {debug}"
                 )
-            # prendo la prima corrispondenza da sinistra: nel layout ISTAT il blocco
-            # "totale alberghi"/"totale extra-alberghieri" precede sempre l'eventuale
-            # colonna "TOTALE/TOTAL" generale che, per via del ffill, eredita lo stesso
-            # testo di categoria e potrebbe comparire come falso candidato più a destra.
+            # take the first match from the left: in the ISTAT layout the
+            # "total hotels"/"total non-hotel" block always precedes any
+            # general "TOTALE/TOTAL" column which, due to ffill, inherits the
+            # same category text and could appear as a false candidate further
+            # to the right.
             return candidates[0]
 
-        col_cod_istat = None
+        col_istat_code = None
         for col in range(raw.shape[1]):
             if "istat" in _clean(measure_row.iat[col]):
-                col_cod_istat = col
+                col_istat_code = col
                 break
-        if col_cod_istat is None:
-            raise ValueError("Colonna 'Cod. Istat' non trovata nel file.")
+        if col_istat_code is None:
+            raise ValueError("Column 'Cod. Istat' not found in the file.")
 
-        col_anno = 0
-        col_letti_alberghi_tot = _find_col("totale alberghi", "letti")
-        col_letti_extra_tot = _find_col("totale extra-alberghieri", "letti")
-        col_letti_5stelle = _find_col("5 stelle", "letti")
-        col_letti_4stelle = _find_col("4 stelle", "letti")
+        col_year = 0
+        col_hotel_beds_total = _find_col("totale alberghi", "letti")
+        col_non_hotel_beds_total = _find_col("totale extra-alberghieri", "letti")
+        col_beds_5star = _find_col("5 stelle", "letti")
+        col_beds_4star = _find_col("4 stelle", "letti")
 
         data = raw.iloc[measure_row_idx + 1 :].reset_index(drop=True)
 
-        def _to_number(v) -> float:
-            s = "" if pd.isna(v) else str(v).strip()
-            if s in ("", "-", "–", "—"):
-                return 0.0
-            s = s.replace(".", "").replace(",", ".")
-            try:
-                return float(s)
-            except ValueError:
-                return 0.0
-
-        anno = pd.to_numeric(data.iloc[:, col_anno], errors="coerce")
-        subset = data[anno == year].copy()
+        year_series = pd.to_numeric(data.iloc[:, col_year], errors="coerce")
+        subset = data[year_series == year].copy()
         if subset.empty:
-            raise ValueError(f"Nessun dato trovato nel file per l'anno {year}.")
+            raise ValueError(f"No data found in the file for year {year}.")
 
-        cod_istat = subset.iloc[:, col_cod_istat].astype(str).str.strip()
-        letti_alberghi_tot = subset.iloc[:, col_letti_alberghi_tot].map(_to_number)
-        letti_extra_tot = subset.iloc[:, col_letti_extra_tot].map(_to_number)
-        letti_5stelle = subset.iloc[:, col_letti_5stelle].map(_to_number)
-        letti_4stelle = subset.iloc[:, col_letti_4stelle].map(_to_number)
+        istat_code = subset.iloc[:, col_istat_code].astype(str).str.strip()
+        hotel_beds_total = subset.iloc[:, col_hotel_beds_total].map(self._to_number)
+        non_hotel_beds_total = subset.iloc[:, col_non_hotel_beds_total].map(self._to_number)
+        beds_5star = subset.iloc[:, col_beds_5star].map(self._to_number)
+        beds_4star = subset.iloc[:, col_beds_4star].map(self._to_number)
 
-        quota_alta_gamma = pd.Series(0.0, index=letti_alberghi_tot.index)
-        mask_has_hotels = letti_alberghi_tot != 0
-        quota_alta_gamma[mask_has_hotels] = (
-            (letti_5stelle[mask_has_hotels] + letti_4stelle[mask_has_hotels])
-            / letti_alberghi_tot[mask_has_hotels]
+        high_end_share = pd.Series(0.0, index=hotel_beds_total.index)
+        mask_has_hotels = hotel_beds_total != 0
+        high_end_share[mask_has_hotels] = (
+            (beds_5star[mask_has_hotels] + beds_4star[mask_has_hotels])
+            / hotel_beds_total[mask_has_hotels]
             * 100
         ).round(2)
 
         tourism = pd.DataFrame(
             {
-                "_join_key": pd.to_numeric(cod_istat, errors="coerce"),
-                "posti_letto_alberghieri_totale": letti_alberghi_tot,
-                "posti_letto_extra_alberghieri_totale": letti_extra_tot,
-                "qualita_offerta_alberghiera_pct": quota_alta_gamma,
+                "_join_key": pd.to_numeric(istat_code, errors="coerce"),
+                "total_hotel_beds": hotel_beds_total,
+                "total_non_hotel_beds": non_hotel_beds_total,
+                "high_end_hotel_beds_pct": high_end_share,
             }
         )
 
-        result = dataset.copy()
-        result["_join_key"] = pd.to_numeric(result["cod_istat"], errors="coerce")
+        result = self.dataset.copy()
+        result["_join_key"] = pd.to_numeric(result["istat_code"], errors="coerce")
         result = result.merge(tourism, on="_join_key", how="left").drop(columns="_join_key")
-        return result
-    
+
+        self.dataset = result
+        return self
+
     def add_population(
         self,
-        dataset: pd.DataFrame,
         population_csv_path: str | Path,
-    ) -> pd.DataFrame:
+    ) -> "ISTAT":
         """
-        Aggiunge al dataset in input la popolazione residente totale del comune
-        (fonte ISTAT - Popolazione residente per età, sesso e stato civile),
-        facendo il join sul codice ISTAT del comune.
+        Adds the municipality's total resident population to the dataset
+        (source: ISTAT - Resident population by age, sex and marital status),
+        joining on the municipality's ISTAT code.
 
-        Colonna aggiunta:
+        Column added:
         - total_population
         """
+        self._require_dataset("add_population")
+
         population_csv_path = Path(population_csv_path)
         if not population_csv_path.exists():
             raise FileNotFoundError(
-                f"CSV popolazione non trovato: {population_csv_path}"
+                f"Population CSV not found: {population_csv_path}"
             )
 
-        POP_KEY_FIELD = "Codice comune"
-        POP_ETA_FIELD = "Età"
-        POP_TOTALE_FIELD = "Totale"
-        POP_ETA_TOTALE = 999
+        POPULATION_KEY_FIELD = "Codice comune"
+        POPULATION_AGE_FIELD = "Età"
+        POPULATION_TOTAL_FIELD = "Totale"
+        POPULATION_AGE_TOTAL_CODE = 999
 
-        # La prima riga del file è un titolo descrittivo (non l'header delle
-        # colonne), quindi la saltiamo con skiprows=1. Tutti i campi sono tra
-        # virgolette e separati da ';'.
-        pop_df = pd.read_csv(
+        # The first row of the file is a descriptive title (not the column
+        # header), so we skip it with skiprows=1. All fields are quoted and
+        # separated by ';'.
+        population_df = pd.read_csv(
             population_csv_path,
             sep=";",
             skiprows=1,
@@ -252,53 +304,52 @@ class ISTAT:
         )
 
         missing = [
-            c for c in (POP_KEY_FIELD, POP_ETA_FIELD, POP_TOTALE_FIELD)
-            if c not in pop_df.columns
+            c for c in (POPULATION_KEY_FIELD, POPULATION_AGE_FIELD, POPULATION_TOTAL_FIELD)
+            if c not in population_df.columns
         ]
         if missing:
             raise ValueError(
-                f"Colonne attese non trovate nel CSV popolazione: {missing}. "
-                f"Colonne disponibili: {list(pop_df.columns)}"
+                f"Expected columns not found in the population CSV: {missing}. "
+                f"Available columns: {list(population_df.columns)}"
             )
 
-        # L'età arriva come stringa (es. "999"): la convertiamo per poter
-        # filtrare sulla riga di totale.
-        eta_numeric = pd.to_numeric(pop_df[POP_ETA_FIELD], errors="coerce")
-        totals = pop_df[eta_numeric == POP_ETA_TOTALE].copy()
+        # Age comes in as a string (e.g. "999"): we convert it so we can
+        # filter on the total row.
+        age_numeric = pd.to_numeric(population_df[POPULATION_AGE_FIELD], errors="coerce")
+        totals = population_df[age_numeric == POPULATION_AGE_TOTAL_CODE].copy()
         if totals.empty:
             raise ValueError(
-                f"Nessuna riga con Età = {POP_ETA_TOTALE} trovata nel CSV popolazione."
+                f"No row with Age = {POPULATION_AGE_TOTAL_CODE} found in the population CSV."
             )
-
-        def _to_number(v) -> float:
-            s = "" if pd.isna(v) else str(v).strip()
-            if s in ("", "-", "–", "—"):
-                return 0.0
-            s = s.replace(".", "").replace(",", ".")
-            try:
-                return float(s)
-            except ValueError:
-                return 0.0
 
         population = pd.DataFrame(
             {
-                # Il codice comune è alfanumerico con zero iniziali (es. "028001"):
-                # per il join lo normalizziamo a numero, come per gli altri join.
-                "_join_key": pd.to_numeric(totals[POP_KEY_FIELD], errors="coerce"),
-                "total_population": totals[POP_TOTALE_FIELD].map(_to_number),
+                # The municipality code is alphanumeric with leading zeros
+                # (e.g. "028001"): for the join we normalize it to a number,
+                # as with the other joins.
+                "_join_key": pd.to_numeric(totals[POPULATION_KEY_FIELD], errors="coerce"),
+                "total_population": totals[POPULATION_TOTAL_FIELD].map(self._to_number),
             }
         )
 
-        # Se per lo stesso comune ci fossero più righe di totale (non dovrebbe
-        # succedere ma per sicurezza), teniamo l'ultima.
+        # If there were multiple total rows for the same municipality
+        # (shouldn't happen, but just in case), keep the last one.
         population = population.drop_duplicates(subset="_join_key", keep="last")
 
-        result = dataset.copy()
-        result["_join_key"] = pd.to_numeric(result["cod_istat"], errors="coerce")
+        result = self.dataset.copy()
+        result["_join_key"] = pd.to_numeric(result["istat_code"], errors="coerce")
         result = result.merge(population, on="_join_key", how="left").drop(columns="_join_key")
-        return result
 
-    def save_to_csv(self, dataset: pd.DataFrame, output_csv_path: str | Path) -> None:
+        self.dataset = result
+        return self
+
+    # ------------------------------------------------------------------
+    # Output
+    # ------------------------------------------------------------------
+
+    def save_to_csv(self, output_csv_path: str | Path) -> "ISTAT":
+        self._require_dataset("save_to_csv")
         output_csv_path = Path(output_csv_path)
         output_csv_path.parent.mkdir(parents=True, exist_ok=True)
-        dataset.to_csv(output_csv_path, index=False, encoding="utf-8")
+        self.dataset.to_csv(output_csv_path, index=False, encoding="utf-8")
+        return self
