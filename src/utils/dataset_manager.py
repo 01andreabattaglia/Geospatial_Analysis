@@ -174,6 +174,83 @@ class DatasetManager:
         self.dataset = result
         return self
 
+    def fill_missing_overnight_stays(self, excel_path: str) -> "DatasetManager":
+        """
+        Fills missing values (NaN) in 'total_overnight_stays' using the provincial
+        aggregate rows present in the ISTAT Excel file (municipality rows whose
+        istat_code ends in '777', e.g. "Altri comuni della provincia di TORINO").
+
+        For each province, the aggregate total is distributed among the
+        municipalities in the dataset that have a missing total_overnight_stays,
+        weighted by their total_population.
+        """
+        self._require_dataset("fill_missing_overnight_stays")
+
+        if "total_population" not in self.dataset.columns:
+            raise RuntimeError(
+                "Column 'total_population' is missing: call add_extra_features() "
+                "with population data before fill_missing_overnight_stays()."
+            )
+
+        print(f"Reading file: {excel_path} (this may take a few seconds)...")
+
+        try:
+            df = pd.read_excel(excel_path, sheet_name="2024", skiprows=6, header=None)
+
+            df_filtered = df[[5, 19]].copy()
+            df_filtered.columns = ["istat_code", "total_overnight_stays"]
+            df_filtered = df_filtered.dropna(subset=["istat_code"])
+
+            df_filtered["istat_code"] = df_filtered["istat_code"].apply(
+                lambda x: str(int(x)).zfill(6)
+                if pd.notnull(x) and str(x).replace(".", "").isdigit()
+                else str(x).strip()
+            )
+
+            df_filtered["total_overnight_stays"] = (
+                pd.to_numeric(df_filtered["total_overnight_stays"], errors="coerce")
+                .fillna(0)
+                .round(0)
+                .astype(int)
+            )
+
+        except Exception as e:
+            raise ValueError(f"An error occurred while extracting the Excel file: {e}")
+
+        # keep only the provincial aggregate rows ("Altri comuni della provincia di ...")
+        province_rows = df_filtered[df_filtered["istat_code"].str.endswith("777")].copy()
+        province_rows["province_code"] = province_rows["istat_code"].str[:3]
+        province_totals = province_rows.set_index("province_code")["total_overnight_stays"].to_dict()
+
+        dataset = self.dataset.copy()
+        dataset["province_code"] = dataset["province_code"].astype(str).str.zfill(3)
+
+        missing_mask = dataset["total_overnight_stays"].isna()
+
+        for province_code, province_total in province_totals.items():
+            prov_missing_mask = missing_mask & (dataset["province_code"] == province_code)
+
+            if not prov_missing_mask.any():
+                continue
+
+            population = dataset.loc[prov_missing_mask, "total_population"].fillna(0)
+            population_sum = population.sum()
+
+            if population_sum > 0:
+                allocation = (population / population_sum) * province_total
+            else:
+                # no population data available: split equally as a fallback
+                allocation = pd.Series(
+                    province_total / prov_missing_mask.sum(), index=population.index
+                )
+
+            dataset.loc[prov_missing_mask, "total_overnight_stays"] = allocation.round(0).astype(int)
+
+        dataset["total_overnight_stays"] = dataset["total_overnight_stays"].astype("Int64")
+
+        self.dataset = dataset
+        return self
+
     # ------------------------------------------------------------------
     # Output
     # ------------------------------------------------------------------
