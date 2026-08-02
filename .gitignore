@@ -3,3 +3,4 @@ data/input/
 __pycache__/
 *.pyc
 *.pyo
+.Rproj.user
