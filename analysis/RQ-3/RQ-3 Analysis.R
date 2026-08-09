@@ -1,64 +1,3 @@
-## ============================================================
-## RQ3 - Are there spatial spillovers between neighbouring
-##       municipalities, and are they complementary or competitive?
-##
-## Builds on the structure and choices of 4_Spatial_regression_models.R
-## (same import/merge, same variable construction, same queen W, same
-## safe_impacts()/trW(type="MC") trick used there for large n).
-## Adds:
-##   - a direct/indirect/total impacts table with sign interpretation
-##     (complementarity vs competition, cf. Yang & Wong 2012;
-##     Arena et al. 2026)
-##   - a territorial breakdown (coast/mountain/plain; North/Centre/
-##     South) via re-estimation of the final model on subsamples,
-##     with W rebuilt on each subsample
-##
-## FIX 1: fit_impacts_by_group() now drops any predictor that becomes
-## constant / collapses to a single factor level within a given
-## territorial subsample (e.g. island_municipality inside the
-## "Island" subgroup) before re-estimating the model there. Without
-## this, lagsarlm()/errorsarlm() fails with:
-##   "i contrasti si possono applicare solo a variabili factor con 2
-##    o più livelli" ("contrasts can be applied only to factors with
-##    2 or more levels")
-## because a factor that is literally constant within the subsample
-## can't get contrasts built for it.
-##
-## FIX 2 (this version): fit_impacts_by_group() no longer calls
-## droplevels() directly on the sf subsample. `sub` is still an sf
-## object at that point (it carries the geometry list-column, class
-## sfc/sfc_GEOMETRY). droplevels.data.frame() tries to apply
-## droplevels() to *every* column, including the geometry column, and
-## there is no droplevels() method for class sfc_GEOMETRY/sfc, which
-## produced:
-##   "Errore in UseMethod("droplevels"): su un oggetto di classe
-##    'sfc_GEOMETRY', 'sfc' è stato usato un metodo non applicabile"
-## Fixed with drop_unused_levels_sf(), a small wrapper that drops
-## unused levels only on the actual factor columns and explicitly
-## skips the sf geometry column, preserving the original intent
-## (clear out stray factor levels left over from the full dataset
-## before checking/dropping constant predictors) without touching the
-## geometry.
-##
-## FIX 3 (this version): safe_impacts() no longer decides whether to
-## fall back to R = NULL by grepl()-ing the English string "not
-## positive definite" out of the error message. Under a non-English R
-## session (e.g. Italian) the equivalent mvrnorm() failure reads
-## "'Sigma' non è definito positivo", the English-only pattern never
-## matched, and the intended graceful fallback instead re-raised the
-## error and stopped the script (seen when fitting fragmented
-## territorial subsamples, whose ill-conditioned Hessian - flagged by
-## the accompanying "NaN" warning from sqrt(diag(fdHess)[-1]) -
-## produces a non-positive-definite covariance for the simulation
-## step). safe_impacts() now falls back to R = NULL on *any* error
-## raised while requesting simulated impacts, independent of locale
-## or exact message wording.
-## ============================================================
-## Required packages:
-##   install.packages(c("sf", "spdep", "spatialreg", "dplyr", "readr",
-##                       "ggplot2", "stringr", "broom"))
-## ============================================================
-
 library(sf)
 library(spdep)
 library(spatialreg)
@@ -68,11 +7,7 @@ library(ggplot2)
 library(stringr)
 library(broom)
 
-dir.create("analysis/RQ-3", recursive = TRUE, showWarnings = FALSE)
-
-## ------------------------------------------------------------
-## 0. DATA IMPORT + MERGE (identical to RQ1/RQ2)
-## ------------------------------------------------------------
+## 1. IMPORT AND MERGE ------------------------------------------------
 
 df <- read_csv("data/tourism_final_dataset.csv",
                col_types = cols(
@@ -90,11 +25,7 @@ map_data <- comuni_sf %>%
   filter(!st_is_empty(geometry)) %>%
   st_make_valid()
 
-cat("Municipalities used in the RQ3 analysis:", nrow(map_data), "\n")
-
-## ------------------------------------------------------------
-## 1. VARIABLE CONSTRUCTION (same as RQ2)
-## ------------------------------------------------------------
+## 2. VARIABLE CONSTRUCTION --------------------------------------------
 
 map_data <- map_data %>%
   mutate(
@@ -144,17 +75,6 @@ durbin_formula <- ~ log_hotel_beds + log_non_hotel_beds +
   log_nature + log_theme_parks + log_nightlife + log_transport_pts +
   log_airport_dist
 
-## Territorial grouping needed for the RQ3 breakdown:
-## - coast / mountain / plain, derived from island_municipality,
-##   sea_coast_km/lake_coast_km and altitude_zone (labels to be
-##   adapted to the actual values of altitude_zone in the dataset)
-## - North / Centre / South-Islands, derived from COD_RIP, the
-##   official ISTAT "ripartizione geografica" code already present in
-##   the boundary shapefile:
-##     1 = North-West, 2 = North-East, 3 = Centre, 4 = South, 5 = Islands
-##   (see ISTAT's "Codici statistici delle unita' amministrative"
-##   documentation). This is more robust than matching on region-name
-##   strings, which vary across shapefile releases/encodings.
 stopifnot("COD_RIP" %in% names(map_data))
 
 map_data <- map_data %>%
@@ -173,10 +93,6 @@ map_data <- map_data %>%
     )
   )
 
-## Sanity check: COD_RIP should only take values 1-5; anything else
-## (or a collapsed macro_area) signals the field does not follow the
-## standard ISTAT coding in this shapefile release - inspect with:
-##   sort(unique(map_data$COD_RIP))
 if (any(!map_data$COD_RIP %in% 1:5) || length(unique(map_data$macro_area)) < 2) {
   warning(
     "Unexpected COD_RIP values or macro_area collapsed to a single ",
@@ -187,20 +103,9 @@ if (any(!map_data$COD_RIP %in% 1:5) || length(unique(map_data$macro_area)) < 2) 
   )
 }
 
-## ------------------------------------------------------------
-## 2. SPATIAL WEIGHT MATRIX W (queen, as selected in RQ1/RQ2)
-## ------------------------------------------------------------
+## 3. SPATIAL WEIGHT MATRIX W (queen contiguity) -----------------------
 
 build_listw <- function(data) {
-  ## Reset row names to a plain 1..n sequence before building any
-  ## neighbour object. poly2nb() tags its neighbour list with
-  ## region.id = row.names(data), while knn2nb(knearneigh(...)) always
-  ## numbers observations 1..n; on a filtered subset (as used in the
-  ## group-wise re-estimation below) the original row names are NOT
-  ## 1..n, so the two neighbour lists disagree on IDs and union.nb()
-  ## fails with "Both neighbor objects must be generated from the same
-  ## coordinates". Resetting row names here makes the IDs consistent
-  ## regardless of whether `data` is the full dataset or a subset.
   row.names(data) <- as.character(seq_len(nrow(data)))
   
   nb <- poly2nb(data, queen = TRUE)
@@ -218,16 +123,9 @@ build_listw <- function(data) {
 
 listw_queen <- build_listw(map_data)
 
-## ------------------------------------------------------------
-## 3. FINAL MODEL (outcome of the selection performed in RQ2:
-##    Elhorst 2010 - LM/RLM tests + LR test SDM vs SAR/SEM)
-## ------------------------------------------------------------
-## NOTE: replace "SAR" with the specification actually indicated by
-## analysis/RQ-2/lrt_table.csv and analysis/RQ-2/lm_tests_table.csv.
-## The model is re-estimated here so that the RQ3 script is
-## self-contained (it does not depend on RQ2's in-memory objects).
+## 4. FINAL MODEL (outcome of the selection performed in RQ2) ----------
 
-final_model_name <- "SAR"   # <-- align with RQ2 (SAR / SEM / SDM / SDEM)
+final_model_name <- "SAR"   # align with RQ2 (SAR / SEM / SDM / SDEM)
 
 final_model <- switch(final_model_name,
                       SAR  = lagsarlm(model_formula, data = map_data, listw = listw_queen,
@@ -242,33 +140,8 @@ final_model <- switch(final_model_name,
 )
 summary(final_model)
 
-## ------------------------------------------------------------
-## 4. DIRECT/INDIRECT/TOTAL IMPACTS (LeSage & Pace 2009)
-## ------------------------------------------------------------
-## Same strategy as RQ2: the trace of the powers of W is approximated
-## via Monte Carlo simulation (trW type = "MC"), with a fallback to
-## R = NULL if the simulation step fails (typically because vcov(model)
-## / the fdHess-based covariance is not positive definite, which shows
-## up as an mvrnorm() error on 'Sigma').
-##
-## FIX 3: the previous version tried to detect this specific failure
-## by grepl()-ing the English string "not positive definite" out of
-## the error message. That only works if R is running under an
-## English locale. Under an Italian session the same underlying
-## mvrnorm() failure raises "'Sigma' non è definito positivo" instead,
-## the grepl() didn't match, and the handler fell through to stop(e),
-## turning what was meant to be a graceful fallback into a fatal
-## error (as seen with fit_impacts_by_group() on the "Coast/Lake" or
-## similar fragmented subsamples, where poly2nb()/union.nb() report
-## many disconnected sub-graphs and the resulting Hessian is
-## ill-conditioned - hence also the "NaN" warning from
-## sqrt(diag(fdHess)[-1]) immediately before the crash).
-## Fixed by no longer inspecting the error message at all: any error
-## raised specifically while requesting the *simulated* impacts
-## (R = R) is treated as a signal to fall back to point estimates
-## only (R = NULL), regardless of locale or exact wording. Genuine
-## upstream problems (bad formula, singular design matrix, etc.) will
-## already have surfaced earlier, when fitting mod_sub itself.
+## 5. DIRECT/INDIRECT/TOTAL IMPACTS (LeSage & Pace 2009) ----------------
+
 safe_impacts <- function(model, tr, R = 100) {
   tryCatch({
     impacts(model, tr = tr, R = R)
@@ -287,65 +160,35 @@ trMC <- trW(W_sparse, type = "MC")
 
 imp_final <- safe_impacts(final_model, trMC, R = 100)
 
-## Direct/indirect/total table with interpretation of the sign of the
-## indirect effect (spillover):
+## Sign of the indirect effect (spillover):
 ##   indirect > 0 and significant -> complementarity/agglomeration
 ##   indirect < 0 and significant -> substitution/competition
 ##   not significant               -> no evidence of spillover
-##
-## NOTE: this deliberately does NOT rely on summary.lagImpact()'s
-## internal field names (e.g. $direct_sum), which have changed across
-## spatialreg versions and caused "numero di dimensioni errato" /
-## "wrong number of dimensions" here. Instead it reads the point
-## estimates straight from imp$res (always present) and, when
-## available, computes indirect-effect significance directly from the
-## simulated draws in imp$sres (mean/sd of the R simulated indirect
-## coefficients -> z-stat -> two-sided p-value), which is the same
-## quantity summary(imp, zstats = TRUE) reports internally.
 build_impacts_table <- function(imp, alpha = 0.05) {
   res <- imp$res
   direct   <- as.numeric(res$direct)
   indirect <- as.numeric(res$indirect)
   total    <- as.numeric(res$total)
   
-  ## FIX 4: on small/near-degenerate subsamples (e.g. after
-  ## drop_constant_terms() has stripped most predictors, combined with
-  ## a fragmented W) impacts() can return direct/indirect/total
-  ## vectors of DIFFERENT lengths from one another (observed: direct
-  ## length 1, indirect length 0). data.frame() then fails with the
-  ## opaque "arguments imply differing number of rows" error, which
-  ## gives no hint about which group or why. Turn that into an
-  ## explicit, informative error here; fit_impacts_by_group() catches
-  ## it and skips just this group instead of stopping the whole loop.
   lens <- c(direct = length(direct), indirect = length(indirect), total = length(total))
   if (length(unique(lens)) > 1) {
     stop(sprintf(
       paste("impacts() returned mismatched vector lengths",
             "(direct = %d, indirect = %d, total = %d): the model fit",
             "on this subsample is too degenerate to build an impacts",
-            "table (likely too few predictors survived",
-            "drop_constant_terms(), or too fragmented a W)."),
+            "table."),
       lens["direct"], lens["indirect"], lens["total"]
     ), call. = FALSE)
   }
   
-  ## Variable-name fallback chain: named vector -> colnames of the
-  ## simulated-draws matrix (imp$sres$direct) -> generic var1..varN.
-  ## Whatever is used, its length is forced to match length(direct) so
-  ## data.frame() below can never fail on a row-count mismatch.
-  var_names <- names(res$direct)
-  if (is.null(var_names) && !is.null(imp$sres) && !is.null(imp$sres$direct)) {
-    var_names <- colnames(imp$sres$direct)
-  }
+  ## Variable names come from the top-level "bnames" attribute, as in
+  ## RQ2's impacts_to_table(): res$direct is unnamed for a SAR model,
+  ## so relying on names(res$direct) or sres colnames is unreliable.
+  var_names <- attr(imp, "bnames")
   if (is.null(var_names) || length(var_names) != length(direct)) {
-    var_names <- paste0("var", seq_along(direct))
-    warning(
-      "Could not recover variable names from impacts()'s output; using ",
-      "generic var1..varN labels instead. To map these back to the ",
-      "actual regressors, compare the order against ",
-      "names(coef(final_model)) (excluding the intercept and rho/lambda).",
-      call. = FALSE
-    )
+    stop("Could not recover variable names from impacts()'s 'bnames' ",
+         "attribute; the model fit on this subsample is too degenerate ",
+         "to build an impacts table.", call. = FALSE)
   }
   
   tab <- data.frame(
@@ -356,7 +199,7 @@ build_impacts_table <- function(imp, alpha = 0.05) {
   )
   
   if (!is.null(imp$sres)) {
-    ind_draws <- as.matrix(imp$sres$indirect)   # R simulated draws x n. variables
+    ind_draws <- as.matrix(imp$sres$indirect)
     ind_mean  <- colMeans(ind_draws)
     ind_sd    <- apply(ind_draws, 2, sd)
     z_indirect <- ind_mean / ind_sd
@@ -374,48 +217,16 @@ build_impacts_table <- function(imp, alpha = 0.05) {
 }
 
 impacts_table <- build_impacts_table(imp_final)
-print(impacts_table)
-write_csv(impacts_table, "analysis/RQ-3/impacts_table.csv")
+impacts_table
 
-## ------------------------------------------------------------
-## 5. TERRITORIAL BREAKDOWN OF SPILLOVERS
-## ------------------------------------------------------------
-## Re-estimates the final model on each subsample (coast/mountain/
-## plain; North/Centre/South-Islands), with W rebuilt on the
-## subsample itself.
-## METHODOLOGICAL CAVEAT to flag in the conclusions: truncating the
-## sample breaks the neighbour structure at the group's edges (border
-## municipalities lose neighbours belonging to the other group), so
-## this is a descriptive/exploratory breakdown rather than a true
-## multi-group spatial interaction; a more robust check would use a
-## model with X*macro_area interaction terms estimated on the full
-## sample with the full W.
-##
-## FIX 1: a territorial subsample can make a predictor constant (most
-## obviously island_municipality inside the "Island" subgroup, but
-## potentially also altitude_zone, has_hotel_beds or has_unesco in
-## smaller groups). lagsarlm()/errorsarlm() cannot build contrasts for
-## a factor with a single observed level, and fails with:
-##   "i contrasti si possono applicare solo a variabili factor con 2
-##    o più livelli"
-## drop_constant_terms() inspects the subsample and strips out any
-## regressor that is constant (numeric) or has collapsed to <2 levels
-## (factor) before fitting, and warns which ones were dropped so this
-## can be reported alongside the breakdown tables (subsamples are then
-## not perfectly comparable variable-for-variable - see caveat above).
-##
-## FIX 2: `sub` is an sf object (it still carries the geometry
-## list-column at the point levels need dropping). Calling the plain
-## droplevels() on it fails because droplevels.data.frame() tries to
-## call droplevels() on every column, including the geometry column
-## (class sfc/sfc_GEOMETRY), for which there is no droplevels()
-## method:
-##   "Errore in UseMethod("droplevels"): su un oggetto di classe
-##    'sfc_GEOMETRY', 'sfc' è stato usato un metodo non applicabile"
-## drop_unused_levels_sf() replicates droplevels()'s effect (drop
-## unused factor levels left over from the full dataset) but only on
-## genuine factor columns, explicitly skipping the sf geometry column
-## so it works safely on sf subsamples.
+## 6. TERRITORIAL BREAKDOWN OF SPILLOVERS --------------------------------
+## Re-estimates the final model on each subsample (coast/mountain/plain;
+## North/Centre/South-Islands), with W rebuilt on the subsample itself.
+## Caveat: truncating the sample breaks the neighbour structure at the
+## group's edges, so this is a descriptive/exploratory breakdown rather
+## than a true multi-group spatial interaction; a more robust check
+## would use a model with X*macro_area interaction terms estimated on
+## the full sample with the full W.
 
 drop_unused_levels_sf <- function(data) {
   geom_col <- attr(data, "sf_column")
@@ -429,7 +240,7 @@ drop_unused_levels_sf <- function(data) {
 }
 
 drop_constant_terms <- function(formula, data) {
-  vars <- all.vars(formula)[-1]  # drop the response (log_stays)
+  vars <- all.vars(formula)[-1]
   drop_vars <- character(0)
   for (v in vars) {
     if (!v %in% names(data)) next
@@ -448,22 +259,6 @@ drop_constant_terms <- function(formula, data) {
   formula
 }
 
-## FIX 4 (structural): fitting a spatial model on a small, possibly
-## territorially-fragmented subsample is inherently numerically
-## fragile - island/singleton neighbour structures, disconnected
-## sub-graphs, ill-conditioned Hessians, and (as a further
-## consequence) degenerate impacts() output are all different
-## symptoms of the same root cause, and new variants of it can appear
-## on any given group. Rather than special-casing each failure mode
-## one at a time, the entire per-group pipeline (level-dropping,
-## constant-term-dropping, W construction, model fitting, impacts
-## simulation, and table construction) is now wrapped in a single
-## tryCatch. Any failure at any stage causes that ONE group to be
-## skipped, with a warning naming the group and the underlying error,
-## while every other group still gets fitted and reported. This
-## replaces the previous behaviour where a single problematic group
-## (e.g. one with too little variation left after dropping constant
-## predictors) aborted the whole coast_type/macro_area breakdown.
 fit_impacts_by_group <- function(data, group_var, min_n = 50) {
   groups <- unique(data[[group_var]])
   out <- lapply(groups, function(g) {
@@ -475,9 +270,6 @@ fit_impacts_by_group <- function(data, group_var, min_n = 50) {
     }
     
     tab_sub <- tryCatch({
-      ## Drop unused factor levels left over from the full dataset
-      ## (sf-safe: skips the geometry column), then drop any predictor
-      ## that is constant/single-level within `sub`.
       sub <- drop_unused_levels_sf(sub)
       formula_sub <- drop_constant_terms(model_formula, sub)
       durbin_sub  <- if (final_model_name %in% c("SDM", "SDEM")) {
@@ -523,27 +315,14 @@ fit_impacts_by_group <- function(data, group_var, min_n = 50) {
 }
 
 impacts_by_coast <- fit_impacts_by_group(map_data, "coast_type")
-if (!is.null(impacts_by_coast)) {
-  write_csv(impacts_by_coast, "analysis/RQ-3/impacts_by_coast_type.csv")
-} else {
-  warning("Skipping write of impacts_by_coast_type.csv: no group succeeded.",
-          call. = FALSE)
-}
+impacts_by_coast
 
 impacts_by_macroarea <- fit_impacts_by_group(map_data, "macro_area")
-if (!is.null(impacts_by_macroarea)) {
-  write_csv(impacts_by_macroarea, "analysis/RQ-3/impacts_by_macro_area.csv")
-} else {
-  warning("Skipping write of impacts_by_macro_area.csv: no group succeeded.",
-          call. = FALSE)
-}
+impacts_by_macroarea
 
-## ------------------------------------------------------------
-## 6. MAP OF THE INDIRECT IMPACT AROUND A SELECTED MUNICIPALITY
-## ------------------------------------------------------------
+## 7. MAP OF THE INDIRECT IMPACT AROUND A SELECTED MUNICIPALITY ---------
 ## Supporting visualisation for the interactive map (project section
-## 3.4): highlights the neighbours (per W) of a chosen municipality,
-## as a basis for shading the spillover in the web app.
+## 3.4): highlights the neighbours (per W) of a chosen municipality.
 
 highlight_neighbours <- function(data, listw, municipality_name, var = "log_museums") {
   idx <- which(data$municipality_name == municipality_name)
@@ -555,36 +334,3 @@ highlight_neighbours <- function(data, listw, municipality_name, var = "log_muse
   data$highlight[nb_ids] <- "Neighbour (W)"
   data
 }
-
-# Example (adapt to a municipality actually present in the dataset):
-# example_map <- highlight_neighbours(map_data, listw_queen, "Example Municipality")
-# ggplot(example_map) +
-#   geom_sf(aes(fill = highlight), color = "white", linewidth = 0.05) +
-#   scale_fill_manual(values = c("Selected municipality" = "#d7191c",
-#                                "Neighbour (W)" = "#fdae61",
-#                                "Other municipalities" = "grey90")) +
-#   theme_minimal()
-# ggsave("analysis/RQ-3/example_neighbours_map.png", width = 8, height = 8, dpi = 200)
-
-## ------------------------------------------------------------
-## 7. SUMMARY OUTPUT
-## ------------------------------------------------------------
-
-cat("\n==================== RQ3 SUMMARY ====================\n")
-cat("Final model used for the impacts:", final_model_name, "\n")
-cat("Direct/indirect/total impacts table: analysis/RQ-3/impacts_table.csv\n")
-cat("Variables with positive spillover (complementarity):\n")
-print(impacts_table$variable[impacts_table$interpretation == "Complementarity / agglomeration"])
-cat("Variables with negative spillover (competition):\n")
-print(impacts_table$variable[impacts_table$interpretation == "Substitution / competition"])
-if (!is.null(impacts_by_coast)) {
-  cat("Coast/mountain/plain breakdown: analysis/RQ-3/impacts_by_coast_type.csv\n")
-} else {
-  cat("Coast/mountain/plain breakdown: NOT written (no group succeeded - see warnings above)\n")
-}
-if (!is.null(impacts_by_macroarea)) {
-  cat("North/Centre/South-Islands breakdown: analysis/RQ-3/impacts_by_macro_area.csv\n")
-} else {
-  cat("North/Centre/South-Islands breakdown: NOT written (no group succeeded - see warnings above)\n")
-}
-cat("=======================================================\n")
