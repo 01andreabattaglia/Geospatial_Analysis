@@ -4,5 +4,7 @@ __pycache__/
 *.pyc
 *.pyo
 .RData
+.RDataTmp
+.RDataTmp1
 .Rhistory
 .Rproj.user/
