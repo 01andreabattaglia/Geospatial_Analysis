@@ -12,7 +12,7 @@ from shapely.ops import linemerge
 METRIC_CRS = "EPSG:32632"
 ISTAT_CODE_FIELD = "PRO_COM"
 MUNICIPALITY_NAME_FIELD = "COMUNE"
-BOUNDARY_BUFFER_METERS = 20
+BOUNDARY_BUFFER_METERS = 50
 
 
 def _extract_lines(geom):
