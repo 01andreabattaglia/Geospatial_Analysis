@@ -86,7 +86,8 @@ listw_queen <- nb2listw(nb_queen, style = "W", zero.policy = TRUE)
 
 ## 4. BASELINE OLS MODEL ---------------------------------------------------
 ols_model <- lm(model_formula, data = map_data)
-print(tidy(ols_model))
+ols_model
+
 
 ## Collinearity check: VIF on the OLS design matrix (type = "predictor"
 ## gives a generalized VIF, adjusted for degrees of freedom, correctly
