@@ -147,14 +147,13 @@ class ISTAT:
         year: int = 2024,
     ) -> "ISTAT":
         """
-        Adds 3 columns to the dataset related to the municipality's tourist
+        Adds 2 columns to the dataset related to the municipality's tourist
         accommodation capacity (source: ISTAT - Capacity of accommodation
         establishments), joining on the municipality's ISTAT code.
 
         Columns added:
         - total_hotel_beds
         - total_non_hotel_beds
-        - high_end_hotel_beds_pct
         """
         self._require_dataset("add_tourism_infrastructure")
 
@@ -227,8 +226,6 @@ class ISTAT:
         col_year = 0
         col_hotel_beds_total = _find_col("totale alberghi", "letti")
         col_non_hotel_beds_total = _find_col("totale extra-alberghieri", "letti")
-        col_beds_5star = _find_col("5 stelle", "letti")
-        col_beds_4star = _find_col("4 stelle", "letti")
 
         data = raw.iloc[measure_row_idx + 1 :].reset_index(drop=True)
 
@@ -240,23 +237,12 @@ class ISTAT:
         istat_code = subset.iloc[:, col_istat_code].astype(str).str.strip()
         hotel_beds_total = subset.iloc[:, col_hotel_beds_total].map(self._to_number)
         non_hotel_beds_total = subset.iloc[:, col_non_hotel_beds_total].map(self._to_number)
-        beds_5star = subset.iloc[:, col_beds_5star].map(self._to_number)
-        beds_4star = subset.iloc[:, col_beds_4star].map(self._to_number)
-
-        high_end_share = pd.Series(0.0, index=hotel_beds_total.index)
-        mask_has_hotels = hotel_beds_total != 0
-        high_end_share[mask_has_hotels] = (
-            (beds_5star[mask_has_hotels] + beds_4star[mask_has_hotels])
-            / hotel_beds_total[mask_has_hotels]
-            * 100
-        ).round(2)
 
         tourism = pd.DataFrame(
             {
                 "_join_key": pd.to_numeric(istat_code, errors="coerce"),
                 "total_hotel_beds": hotel_beds_total,
                 "total_non_hotel_beds": non_hotel_beds_total,
-                "high_end_hotel_beds_pct": high_end_share,
             }
         )
 
