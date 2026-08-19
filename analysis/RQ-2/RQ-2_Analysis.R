@@ -28,7 +28,6 @@ map_data <- map_data %>%
     log_stays = log(1 + total_overnight_stays),
     log_hotel_beds = log(1 + total_hotel_beds),
     log_non_hotel_beds = log(1 + total_non_hotel_beds),
-    has_hotel_beds = factor(if_else(total_hotel_beds > 0, "Yes", "No")),
     island_municipality = factor(island_municipality, levels = c(0, 1),
                                  labels = c("Mainland", "Island")),
     altitude_zone = factor(altitude_zone),
@@ -46,13 +45,7 @@ map_data <- map_data %>%
     has_unesco = factor(if_else(n_unesco_sites > 0, "Yes", "No"))
   )
 
-high_end_mean <- mean(map_data$high_end_hotel_beds_pct[map_data$has_hotel_beds == "Yes"], na.rm = TRUE)
-
-map_data <- map_data %>%
-  mutate(high_end_pct_centered = if_else(has_hotel_beds == "Yes",
-                                         high_end_hotel_beds_pct - high_end_mean, 0))
-
-scale_vars <- c("log_hotel_beds", "log_non_hotel_beds", "high_end_pct_centered",
+scale_vars <- c("log_hotel_beds", "log_non_hotel_beds",
                 "log_sea_coast_km", "log_lake_coast_km", "log_protected_area",
                 "log_museums", "log_architecture", "log_sports", "log_nature",
                 "log_theme_parks", "log_nightlife", "log_transport_pts",
@@ -62,7 +55,6 @@ map_data <- map_data %>%
   mutate(across(all_of(scale_vars), ~ as.numeric(scale(.x))))
 
 model_formula <- log_stays ~ log_hotel_beds + log_non_hotel_beds +
-  has_hotel_beds + high_end_pct_centered +
   island_municipality + altitude_zone +
   log_sea_coast_km + log_lake_coast_km + log_protected_area +
   log_museums + log_architecture + log_sports + log_nature +
@@ -70,12 +62,13 @@ model_formula <- log_stays ~ log_hotel_beds + log_non_hotel_beds +
   log_airport_dist + has_unesco
 
 durbin_formula <- ~ log_hotel_beds + log_non_hotel_beds +
-  high_end_pct_centered + log_sea_coast_km + log_lake_coast_km +
+  log_sea_coast_km + log_lake_coast_km +
   log_protected_area + log_sports + log_nature +
-  log_transport_pts + log_airport_dist
+  log_transport_pts
 
 ## 3. SPATIAL WEIGHT MATRIX ---------------------------------------------
 nb_queen <- suppressWarnings(poly2nb(map_data, queen = TRUE))
+
 if (sum(card(nb_queen) == 0) > 0) {
   coords <- st_coordinates(st_centroid(st_geometry(map_data)))
   nb_queen <- suppressWarnings(
@@ -93,71 +86,76 @@ listw_queen <- nb2listw(nb_queen, style = "W", zero.policy = TRUE)
 ## 4. BASELINE OLS MODEL -------------------------------------------------
 ols_model <- lm(model_formula, data = map_data)
 
-## 5. SPATIAL DIAGNOSTICS ON OLS RESIDUALS -------------------------------
-moran_resid <- lm.morantest(ols_model, listw_queen, zero.policy = TRUE, alternative = "greater")
+# OLS MODEL
+print(summary(ols_model))
 
-lm_tests <- lm.RStests(ols_model, listw_queen,
-                       test = c("RSerr", "RSlag", "adjRSerr", "adjRSlag"),
-                       zero.policy = TRUE)
+## 5. SPATIAL DIAGNOSTICS ON OLS RESIDUALS -------------------------------
+moran_resid <- lm.morantest(
+  ols_model, listw_queen,
+  zero.policy = TRUE, alternative = "greater"
+)
+
+lm_tests <- lm.RStests(
+  ols_model, listw_queen,
+  test = c("RSerr", "RSlag", "adjRSerr", "adjRSlag"),
+  zero.policy = TRUE
+)
+
+# MORAN TEST ON OLS RESIDUALS
+print(moran_resid)
+
+# LM TESTS
+print(lm_tests)
 
 ## 6. ESTIMATION OF SPATIAL MODELS ---------------------------------------
 SDM <- lagsarlm(model_formula, data = map_data, listw = listw_queen,
-                Durbin = durbin_formula, method = "Matrix", zero.policy = TRUE)
+                Durbin = durbin_formula, method = "Matrix",
+                zero.policy = TRUE)
+
 SAR <- lagsarlm(model_formula, data = map_data, listw = listw_queen,
                 method = "Matrix", zero.policy = TRUE)
+
 SDEM <- errorsarlm(model_formula, data = map_data, listw = listw_queen,
-                   Durbin = durbin_formula, method = "Matrix", zero.policy = TRUE)
+                   Durbin = durbin_formula, method = "Matrix",
+                   zero.policy = TRUE)
+
 SEM <- errorsarlm(model_formula, data = map_data, listw = listw_queen,
                   method = "Matrix", zero.policy = TRUE)
+
 SLX <- lmSLX(model_formula, data = map_data, listw = listw_queen,
              Durbin = durbin_formula, zero.policy = TRUE)
 
 ## 7. MODEL COMPARISON ---------------------------------------------------
 model_comparison <- data.frame(
   model = c("OLS", "SAR", "SEM", "SDM", "SDEM", "SLX"),
-  AIC = c(AIC(ols_model), AIC(SAR), AIC(SEM), AIC(SDM), AIC(SDEM), AIC(SLX)),
+  AIC = c(AIC(ols_model), AIC(SAR), AIC(SEM),
+          AIC(SDM), AIC(SDEM), AIC(SLX)),
   logLik = c(as.numeric(logLik(ols_model)), as.numeric(logLik(SAR)),
              as.numeric(logLik(SEM)), as.numeric(logLik(SDM)),
              as.numeric(logLik(SDEM)), as.numeric(logLik(SLX)))
 )
 
+# MODEL COMPARISON
+print(model_comparison)
+
 lrt_sdm_sar <- anova(SDM, SAR)
 lrt_sdm_sem <- anova(SDM, SEM)
 
-## 8. DIRECT AND INDIRECT IMPACTS ----------------------------------------
-set.seed(123)
-W_sparse <- as(listw_queen, "CsparseMatrix")
-trMC <- trW(W_sparse, type = "MC")
+# SDM VS SAR
+print(lrt_sdm_sar)
 
-safe_impacts <- function(model, tr, R = 100) {
-  tryCatch({
-    impacts(model, tr = tr, R = R)
-  }, error = function(e) {
-    if (grepl("not positive definite|definito positivo", conditionMessage(e), ignore.case = TRUE)) {
-      impacts(model, tr = tr, R = NULL)
-    } else stop(e)
-  })
-}
+# SDM VS SEM 
+print(lrt_sdm_sem)
 
-impacts_to_table <- function(imp, label) {
-  res <- if (!is.null(imp$res)) imp$res else imp
-  var_names <- attr(imp, "bnames")
-  
-  data.frame(
-    variable = var_names,
-    direct = as.numeric(res$direct),
-    indirect = as.numeric(res$indirect),
-    total = as.numeric(res$total),
-    model = label,
-    row.names = NULL
-  )
-}
+## 8. SDM COEFFICIENTS ---------------------------------------------------
+sdm_coef <- as.data.frame(coef(summary(SDM)))
+sdm_coef$variable <- rownames(sdm_coef)
+rownames(sdm_coef) <- NULL
 
-impSAR <- safe_impacts(SAR, trMC, R = 100)
-impSDM <- safe_impacts(SDM, trMC, R = 100)
+sdm_coef <- sdm_coef %>%
+  select(variable, everything())
 
-impacts_table <- rbind(impacts_to_table(impSAR, "SAR"),
-                       impacts_to_table(impSDM, "SDM"))
+summary(SDM)
 
 ## 9. RESIDUAL MAPS -----------------------------------------------------
 map_data$ols_resid <- residuals(ols_model)
@@ -194,7 +192,7 @@ legend_plot <- ggplot(map_data) +
         legend.margin = margin(t = -10, unit = "pt"))
 
 residual_comparison <- (p1 | p2) /
-  (legend_plot + guides(fill = guide_colorbar(title = "Residual")) + 
+  (legend_plot + guides(fill = guide_colorbar(title = "Residual")) +
      theme(legend.position = "bottom")) +
   plot_layout(heights = c(10, 1))
 
