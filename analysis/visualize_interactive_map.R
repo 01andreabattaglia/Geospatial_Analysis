@@ -1,11 +1,68 @@
 # ============================================================
-# Interactive spillover map for RQ3
+# Interactive spillover map for RQ3 — v3 (English, revised)
 # Shiny + Leaflet
+#
+# CHANGES IN THIS VERSION vs the previous one:
+#
+#   TAB 1 "Night stays"   - unchanged: observed overnight stays per
+#                            municipality, logarithmic color scale.
+#
+#   TAB 2 "Spillover"     - SIMPLIFIED sidebar: only the Durbin
+#                            variable selector and the spillover-sign
+#                            filter remain. The threshold slider, the
+#                            "significant only" checkbox and the
+#                            scenario multiplier have been removed.
+#                            The map now always shows theta*WX exactly
+#                            as estimated, for every municipality,
+#                            colored by sign/magnitude, optionally
+#                            filtered to positive/negative only.
+#
+#   TAB 3 "What-if"       - REWORKED. Instead of a 0-3 multiplier
+#                            applied to a *standardized* deviation
+#                            (which was hard to interpret), the
+#                            slider now shows the variable in its
+#                            natural (log, but UN-standardized) units,
+#                            centered on the true current value for
+#                            the selected municipality, and lets you
+#                            move it between 0 and twice that value.
+#                            The resulting change in predicted stays
+#                            is now computed and shown for ALL
+#                            municipalities in the network (not just
+#                            the direct neighbours of the selected
+#                            one), and the side table lists the 10
+#                            municipalities with the largest variation
+#                            — ranked by PERCENT change rather than
+#                            raw change, so that large and small
+#                            municipalities are compared on the same
+#                            (relative) scale instead of the ranking
+#                            being dominated by whichever municipality
+#                            happens to have the largest baseline
+#                            number of stays.
+#
+# METHODOLOGICAL NOTE on the "What-if" tab:
+#   The model is a spatial Durbin model (SAR + Durbin):
+#     log_stays = rho * W * log_stays + X*beta + WX*theta + eps
+#   In reduced form:
+#     log_stays_hat = (I - rho*W)^-1 * (X*beta + WX*theta)
+#   Changing variable v in municipality m produces:
+#     (a) a direct effect beta_v on row m (the X*beta term)
+#     (b) an effect theta_v on EVERY neighbour j of m, because WX_j
+#         includes x_m (the WX*theta term)
+#     (c) both shocks then propagate through the whole network via
+#         the global operator (I - rho*W)^-1 (this is why the model
+#         is called a "global spillover" model: in theory the whole
+#         network moves a little, but the effect decays quickly with
+#         network distance and stays concentrated on the municipality
+#         itself and its closest neighbours).
+#   To avoid paying for an ~n x n factorization on every slider move,
+#   the LU factorization of (I - rho*W) is computed ONCE at startup
+#   (section 8); every slider move is then a cheap triangular solve.
 # ============================================================
 
 library(sf)
 library(spdep)
 library(spatialreg)
+library(Matrix)
 library(dplyr)
 library(readr)
 library(stringr)
@@ -26,18 +83,15 @@ map_data <- comuni_sf %>%
   inner_join(df, by = "municipality_id") %>%
   filter(!st_is_empty(geometry)) %>%
   st_make_valid()
-# IMPORTANT: no st_transform() here. The canonical
-# RQ3 script fits poly2nb()/lagsarlm() on the
-# shapefile's native CRS (EPSG:32632, despite the
-# "_WGS84" filename). Reprojection is not exact at
-# floating-point level - it can silently break or
-# create shared-vertex touches between adjacent
-# polygons, changing nb_queen/listw_queen and
-# therefore SDM's Hessian (this is what caused the
-# NaN warning that RQ3 itself does not produce).
-# WGS84 (4326) reprojection for Leaflet is applied
-# further down, AFTER the model is fit, to a
-# render-only copy - see section 7b.
+# IMPORTANT: no st_transform() here. The canonical RQ3 script fits
+# poly2nb()/lagsarlm() on the shapefile's native CRS (EPSG:32632,
+# despite the "_WGS84" filename). Reprojection is not exact at
+# floating-point level - it can silently break or create shared-vertex
+# touches between adjacent polygons, changing nb_queen/listw_queen and
+# therefore the SDM's Hessian (this is what caused the NaN warning
+# that RQ3 itself does not produce).
+# WGS84 (4326) reprojection for Leaflet is applied further down, AFTER
+# the model is fit, to a render-only copy - see section 7b.
 
 ## 2. HANDLE MUNICIPALITY NAME FOR POPUPS -------------------------------
 if ("municipality_name" %in% names(map_data)) {
@@ -80,6 +134,23 @@ scale_vars <- c("log_hotel_beds", "log_non_hotel_beds",
                 "log_theme_parks", "log_nightlife", "log_transport_pts",
                 "log_airport_dist")
 
+# Keep the PRE-scaling values of these variables (still on the log
+# scale, but not standardized). Tab 3 ("What-if") uses these so the
+# slider can be expressed in real, interpretable units instead of a
+# standardized-deviation multiplier. Row order is preserved end-to-end
+# (see the notes in sections 7b and 8), so this stays aligned with
+# every other row-indexed object built later (nb_queen, X_base, etc).
+raw_scale_vars <- map_data %>% st_drop_geometry() %>% select(all_of(scale_vars))
+
+# Mean/sd actually used by scale() below, kept so we can convert a
+# raw (log-scale) target value chosen on the What-if slider back into
+# the standardized units the model was fit on, and vice versa.
+scale_params <- lapply(scale_vars, function(v) {
+  x <- raw_scale_vars[[v]]
+  list(mean = mean(x, na.rm = TRUE), sd = sd(x, na.rm = TRUE))
+})
+names(scale_params) <- scale_vars
+
 map_data <- map_data %>%
   mutate(across(all_of(scale_vars), ~ as.numeric(scale(.x))))
 
@@ -114,11 +185,12 @@ SDM <- lagsarlm(model_formula, data = map_data, listw = listw_queen,
 
 ## 6. DIRECT / INDIRECT / TOTAL IMPACTS -----------------------------------
 # IMPORTANT: this block is kept IDENTICAL to the canonical RQ3 script
-# (trW type, seed, R, and the safe_impacts fallback logic) so the impacts
-# table - and therefore every p-value/spillover-type shown in the app -
-# matches the published RQ3 results exactly. Do not "improve" this in
-# isolation; if trExact/deterministic tracing is wanted, it needs to be
-# changed in the canonical RQ3 script too, and results re-validated there.
+# (trW type, seed, R, and the safe_impacts fallback logic) so the
+# impacts table - and therefore every p-value/spillover-type shown in
+# the app - matches the published RQ3 results exactly. Do not
+# "improve" this in isolation; if trExact/deterministic tracing is
+# wanted, it needs to be changed in the canonical RQ3 script too, and
+# results re-validated there.
 set.seed(123)
 W_sparse <- as(listw_queen, "CsparseMatrix")
 trMC <- trW(W_sparse, type = "MC")
@@ -170,13 +242,26 @@ for (v in spill_vars) {
   map_data_spill[[spill_name]] <- theta * map_data_spill[[wx_name]]
 }
 
+# Attach the pre-scaling (raw log-scale) values too, for tab 3. Row
+# order matches map_data / map_data_spill throughout (see notes in
+# 7b and 8), so a plain positional attach is safe.
+for (v in scale_vars) {
+  map_data_spill[[paste0("raw_", v)]] <- raw_scale_vars[[v]]
+}
+
 ## 7b. REPROJECT + SIMPLIFY GEOMETRY FOR LEAFLET (rendering only) ---------
-# Applied here, AFTER the model is fit and all spill_/wx_ columns are
-# attached - NOT before poly2nb()/nb2listw(). This keeps the queen
+# Applied here, AFTER the model is fit and all spill_/wx_/raw_ columns
+# are attached - NOT before poly2nb()/nb2listw(). This keeps the queen
 # contiguity structure (and therefore SDM and impacts_table) byte-for-byte
 # identical to the canonical RQ3 script; only the polygon geometry actually
 # drawn in Leaflet is reprojected/simplified, which is purely a rendering
 # concern and has zero effect on the model above.
+#
+# NOTE: ms_simplify/st_simplify do NOT reorder or drop rows (with
+# keep_shapes = TRUE), so the row index of map_data_spill stays aligned
+# with the one used by nb_queen/W_sparse/SDM. This is essential for the
+# what-if simulator in section 8, which indexes municipalities by row
+# number.
 map_data_spill <- map_data_spill %>%
   st_transform(4326)   # leaflet requires WGS84 lon/lat
 
@@ -185,9 +270,9 @@ if (requireNamespace("rmapshaper", quietly = TRUE)) {
   # stay shared (no gaps/slivers appear), unlike sf::st_simplify()
   map_data_spill <- rmapshaper::ms_simplify(map_data_spill, keep = 0.05, keep_shapes = TRUE)
 } else {
-  message("Pacchetto 'rmapshaper' non installato: uso sf::st_simplify() come ",
-          "ripiego (puo' creare micro-fessure tra comuni confinanti). Per un ",
-          "risultato pulito: install.packages('rmapshaper').")
+  message("Package 'rmapshaper' not installed: falling back to sf::st_simplify() ",
+          "(this can create micro-gaps between neighbouring municipalities). ",
+          "For a cleaner result: install.packages('rmapshaper').")
   map_data_spill <- st_simplify(map_data_spill, dTolerance = 0.0015, preserveTopology = TRUE)
 }
 
@@ -200,17 +285,20 @@ if (requireNamespace("rmapshaper", quietly = TRUE)) {
 if (is.na(st_crs(map_data_spill)) || st_crs(map_data_spill)$epsg != 4326) {
   st_crs(map_data_spill) <- 4326
 }
-# simplification can occasionally produce self-intersecting/invalid
+# Simplification can occasionally produce self-intersecting/invalid
 # geometry - repair it so Leaflet doesn't silently fail to fill affected
 # polygons.
 map_data_spill <- st_make_valid(map_data_spill)
 
+stopifnot(nrow(map_data_spill) == nrow(map_data))  # index alignment, see note above
+
 spill_cols <- paste0("spill_", spill_vars)
 
-# FIX: instead of ONE global max shared by all variables (which washes out
-# the color scale for any variable with smaller effects than the largest
-# one), compute a max |spillover| PER VARIABLE. This is what drives the
-# color palette and the slider for whichever variable is currently selected.
+# Instead of ONE global max shared by all variables (which washes out
+# the color scale for any variable with smaller effects than the
+# largest one), compute a max |spillover| PER VARIABLE. This drives
+# the color palette for whichever variable is currently selected on
+# tab 2.
 max_abs_spill_var <- sapply(spill_cols, function(col) {
   m <- max(abs(map_data_spill[[col]]), na.rm = TRUE)
   if (!is.finite(m) || m == 0) m <- 1e-6
@@ -218,101 +306,229 @@ max_abs_spill_var <- sapply(spill_cols, function(col) {
 })
 names(max_abs_spill_var) <- spill_vars
 
-# keep a global fallback too (used only to set the initial slider bounds)
-max_abs_spill_global <- max(max_abs_spill_var)
-
 p_indirect_map <- setNames(impacts_table$p_indirect, as.character(impacts_table$variable))
 spill_type_map <- setNames(impacts_table$spillover_type, as.character(impacts_table$variable))
 
-## 8. SHINY APP ------------------------------------------------------------
+## 8. WHAT-IF SIMULATOR: PRE-COMPUTE SPARSE SOLVER -------------------------
+n_obs <- nrow(map_data_spill)
+rho_hat <- SDM$rho
+
+# Rebuild the design matrix X ourselves (instead of relying on an
+# undocumented internal slot such as SDM$X): recompute it with
+# model.matrix() on the SAME formula/data passed to lagsarlm, add the
+# WX columns for the Durbin variables using the same listw used at
+# estimation time, then reorder columns by NAME to match the model's
+# coefficients. If anything doesn't line up (e.g. a spatialreg version
+# that names the "lag." terms differently), the stopifnot() below fails
+# explicitly instead of silently producing wrong numbers.
+X_base <- model.matrix(model_formula, data = map_data_spill)
+for (v in spill_vars) {
+  X_base <- cbind(X_base, map_data_spill[[paste0("wx_", v)]])
+  colnames(X_base)[ncol(X_base)] <- paste0("lag.", v)
+}
+stopifnot("SDM coefficient names not found in the rebuilt X_base: check formula/Durbin spec" =
+            all(names(SDM$coefficients) %in% colnames(X_base)))
+X_base <- X_base[, names(SDM$coefficients), drop = FALSE]
+
+I_n <- Matrix::Diagonal(n_obs)
+A_mat <- I_n - rho_hat * W_sparse
+A_lu <- Matrix::lu(A_mat)   # reusable factorization: every later solve() is cheap
+
+baseline_rhs <- as.numeric(X_base %*% SDM$coefficients)
+baseline_signal <- as.numeric(Matrix::solve(A_lu, baseline_rhs))   # log(1+stays) predicted by the model
+baseline_stays_hat <- expm1(baseline_signal)
+
+map_data_spill$baseline_signal <- baseline_signal
+map_data_spill$baseline_stays_hat <- baseline_stays_hat
+
+beta_lookup <- setNames(as.numeric(SDM$coefficients[spill_vars]), spill_vars)
+theta_lookup <- setNames(
+  sapply(spill_vars, function(v) {
+    nm <- paste0("lag.", v)
+    if (nm %in% names(SDM$coefficients)) unname(SDM$coefficients[nm]) else 0
+  }),
+  spill_vars
+)
+
+#' Recompute predicted overnight stays after setting variable `v` in
+#' municipality (row) `m_idx` to the ABSOLUTE target value
+#' `target_raw`. `target_raw` is expressed in the same (log, but
+#' UN-standardized) units as raw_<v> / the What-if slider - NOT in
+#' standardized units. Internally it is converted to the standardized
+#' scale the model was fit on before computing the shock. Returns a
+#' data.frame for ALL municipalities (a single sparse solve, then only
+#' O(n) vector algebra), so downstream code can look at the whole
+#' network, not just the direct neighbours of m_idx.
+whatif_predict <- function(m_idx, v, target_raw) {
+  x_col <- X_base[, v]                 # current standardized values, all rows
+  sp <- scale_params[[v]]
+  target_std <- (target_raw - sp$mean) / sp$sd
+  
+  delta_v <- numeric(n_obs)
+  delta_v[m_idx] <- target_std - x_col[m_idx]
+  
+  Wdelta <- as.numeric(W_sparse %*% delta_v)   # non-zero only for neighbours of m_idx
+  delta_rhs <- beta_lookup[[v]] * delta_v + theta_lookup[[v]] * Wdelta
+  
+  delta_signal <- as.numeric(Matrix::solve(A_lu, delta_rhs))
+  new_signal <- baseline_signal + delta_signal
+  new_stays <- expm1(new_signal)
+  
+  idx_vec <- seq_len(n_obs)
+  data.frame(
+    idx = idx_vec,
+    municipality_id = map_data_spill$municipality_id,
+    municipality_name = map_data_spill$municipality_name,
+    baseline_stays = baseline_stays_hat,
+    new_stays = new_stays,
+    delta_stays = new_stays - baseline_stays_hat,
+    pct_change = ifelse(baseline_stays_hat > 0,
+                        100 * (new_stays - baseline_stays_hat) / baseline_stays_hat,
+                        NA_real_),
+    is_selected = idx_vec == m_idx,
+    is_neighbour = idx_vec %in% nb_queen[[m_idx]]
+  )
+}
+
+## 9. SHINY APP ------------------------------------------------------------
 ui <- fluidPage(
   titlePanel("Tourism spillover explorer — RQ3"),
-  sidebarLayout(
-    sidebarPanel(
-      selectInput("spill_var",
-                  "Spillover variable",
-                  choices = spill_vars,
-                  selected = "log_nature"),
-      
-      radioButtons("sign_filter",
-                   "Spillover sign",
-                   choices = c("All", "Complementary (positive)", "Competitive (negative)"),
-                   selected = "All"),
-      
-      checkboxInput("significant_only",
-                    "Only significant municipalities (indirect p < 0.10)",
-                    value = FALSE),
-      
-      # NOTE: min/max/step are now updated dynamically per variable
-      # (see observeEvent below) instead of using the global max.
-      sliderInput("threshold",
-                  "Minimum |spillover| to display",
-                  min = 0,
-                  max = max_abs_spill_global,
-                  value = 0,
-                  step = max_abs_spill_global / 100),
-      
-      sliderInput("multiplier",
-                  "Scenario multiplier for selected resource",
-                  min = 0,
-                  max = 3,
-                  value = 1,
-                  step = 0.1),
-      
-      helpText("The multiplier simulates a simple 'what if' scenario:",
-               "if the selected resource changes by this factor, the spillover",
-               "theta * WX changes by the same factor.")
+  tabsetPanel(
+    id = "main_tabs",
+    
+    ## TAB 1 — default view: observed overnight stays --------------------
+    tabPanel("Night stays",
+             sidebarLayout(
+               sidebarPanel(
+                 helpText("Observed overnight stays per municipality.",
+                          "Logarithmic color scale (the values shown in the",
+                          "legend are already converted back to number of",
+                          "overnight stays).")
+               ),
+               mainPanel(
+                 leafletOutput("map_stays", height = 700)
+               )
+             )
     ),
-    mainPanel(
-      leafletOutput("map", height = 700)
+    
+    ## TAB 2 — spillover explorer (simplified sidebar) --------------------
+    tabPanel("Spillover",
+             sidebarLayout(
+               sidebarPanel(
+                 selectInput("spill_var",
+                             "Spillover variable",
+                             choices = spill_vars,
+                             selected = "log_nature"),
+                 
+                 radioButtons("sign_filter",
+                              "Spillover sign",
+                              choices = c("All", "Complementary (positive)", "Competitive (negative)"),
+                              selected = "All"),
+                 
+                 helpText("Map of the estimated spillover effect theta * WX",
+                          "for the selected variable, as estimated by the model",
+                          "(no scenario multiplier applied). Use the sign filter",
+                          "to isolate complementary (positive) or competitive",
+                          "(negative) spillovers.")
+               ),
+               mainPanel(
+                 leafletOutput("map_spill", height = 700)
+               )
+             )
+    ),
+    
+    ## TAB 3 — what-if for a single municipality ---------------------------
+    tabPanel("What-if",
+             sidebarLayout(
+               sidebarPanel(
+                 selectizeInput("whatif_comune", "Municipality",
+                                choices = NULL,
+                                options = list(placeholder = "Search a municipality...",
+                                               maxOptions = 20)),
+                 
+                 selectInput("whatif_var", "Variable to change",
+                             choices = spill_vars, selected = spill_vars[1]),
+                 
+                 sliderInput("whatif_value",
+                             "Value of the variable (log scale, absolute)",
+                             min = 0, max = 1, value = 0, step = 0.01),
+                 
+                 helpText("The slider is centered on the true current value of",
+                          "the selected variable for the selected municipality,",
+                          "and lets you move it between 0 (variable removed) and",
+                          "twice that value. The map and the tables below then",
+                          "show the resulting change in predicted overnight",
+                          "stays for EVERY municipality in the network, not just",
+                          "the immediate neighbours (blue border = direct",
+                          "neighbour of the selected municipality; black border",
+                          "= selected municipality).",
+                          "Click a municipality on the map to select it, or",
+                          "search for it above."),
+                 hr(),
+                 strong("Selected municipality"),
+                 tableOutput("whatif_selected_table"),
+                 strong("Top 10 municipalities by variation (ranked by % change)"),
+                 tableOutput("whatif_top_table")
+               ),
+               mainPanel(
+                 leafletOutput("map_whatif", height = 700)
+               )
+             )
     )
   )
 )
 
 server <- function(input, output, session) {
   
-  output$map <- renderLeaflet({
-    # PERFORMANCE FIX: default SVG rendering creates one DOM element per
-    # polygon - with ~7900 municipalities this is the main reason redraws
-    # feel sluggish. preferCanvas draws everything on a single <canvas>,
-    # which is dramatically faster for this many shapes.
+  ## ---------- TAB 1: night stays (static, computed once) -----------------
+  output$map_stays <- renderLeaflet({
+    pal_obs <- colorNumeric("YlOrRd", domain = log1p(map_data_spill$total_overnight_stays))
+    
+    dat <- map_data_spill %>%
+      mutate(popup_html = paste0(
+        "<b>", municipality_name, "</b><br>",
+        "Observed overnight stays: ", format(round(total_overnight_stays), big.mark = ",")
+      ))
+    
+    leaflet(dat, options = leafletOptions(preferCanvas = TRUE)) %>%
+      addTiles() %>%
+      setView(lng = 12.5, lat = 42.5, zoom = 6) %>%
+      addPolygons(
+        fillColor = ~pal_obs(log1p(total_overnight_stays)),
+        weight = 0.3,
+        color = "white",
+        fillOpacity = 0.8,
+        smoothFactor = 1.5,
+        label = ~municipality_name,
+        popup = ~popup_html,
+        highlightOptions = highlightOptions(color = "black", weight = 2, bringToFront = TRUE)
+      ) %>%
+      addLegend(
+        position = "bottomright",
+        pal = pal_obs,
+        values = log1p(dat$total_overnight_stays),
+        title = "Observed overnight stays",
+        labFormat = labelFormat(big.mark = ",", digits = 0,
+                                transform = function(x) round(expm1(x))),
+        opacity = 0.8
+      )
+  })
+  
+  ## ---------- TAB 2: spillover explorer (simplified) ----------------------
+  output$map_spill <- renderLeaflet({
     leaflet(map_data_spill, options = leafletOptions(preferCanvas = TRUE)) %>%
       addTiles() %>%
       setView(lng = 12.5, lat = 42.5, zoom = 6)
   })
   
-  # PERFORMANCE FIX: sliders fire an update on every pixel of drag. Debounce
-  # so we only react ~250ms after the user stops moving them, instead of on
-  # every intermediate value.
-  threshold_d <- reactive(input$threshold) %>% debounce(250)
-  multiplier_d <- reactive(input$multiplier) %>% debounce(250)
-  
-  # Rescale the threshold slider whenever the selected variable changes,
-  # so its range matches that variable's own spillover magnitude.
-  observeEvent(input$spill_var, {
-    v <- input$spill_var
-    vmax <- max_abs_spill_var[[v]]
-    updateSliderInput(session, "threshold",
-                      min = 0, max = vmax, value = 0, step = vmax / 100)
-  }, ignoreInit = TRUE)
-  
-  # PERFORMANCE FIX: split into two reactives.
-  # var_data() does the "expensive" per-row work (selecting the right
-  # spillover column, building popup text) and only reruns when the
-  # selected variable or the (debounced) multiplier changes.
-  # filtered() just does cheap row filtering on top of var_data()'s result,
-  # so toggling sign/significance/threshold no longer re-triggers popup
-  # generation - it used to rebuild popup_html for all ~7900 rows on every
-  # single filter tweak, which was pure wasted work.
   var_data <- reactive({
     req(input$spill_var)
     v <- input$spill_var
     spill_name <- paste0("spill_", v)
     wx_name <- paste0("wx_", v)
-    mult <- multiplier_d()
     
     dat <- map_data_spill
-    dat$spill_value <- dat[[spill_name]] * mult
+    dat$spill_value <- dat[[spill_name]]
     dat$wx_value <- dat[[wx_name]]
     dat$selected_var_value <- dat[[v]]
     
@@ -329,7 +545,7 @@ server <- function(input, output, session) {
       mutate(popup_html = paste0(
         "<b>", municipality_name, "</b><br>",
         "Overnight stays: ", round(total_overnight_stays), "<br>",
-        "Selected variable (scaled): ", round(selected_var_value, 3), "<br>",
+        "Selected variable (standardized): ", round(selected_var_value, 3), "<br>",
         "Neighbours' variable (WX): ", round(wx_value, 3), "<br>",
         "Spillover effect (theta*WX): ", round(spill_value, 3), "<br>",
         "Indirect p-value: ", ifelse(is.na(p_indirect), "NA", sprintf("%.3f", p_indirect)), "<br>",
@@ -346,29 +562,19 @@ server <- function(input, output, session) {
       dat <- dat %>% filter(spill_value < 0)
     }
     
-    if (input$significant_only) {
-      dat <- dat %>% filter(p_indirect < 0.10)
-    }
-    
-    dat %>% filter(abs(spill_value) >= threshold_d())
+    dat
   })
   
-  # Current color domain: only changes with variable/multiplier, not with
-  # sign/significance/threshold filters - kept as its own reactive so the
-  # legend observer below doesn't refire on every filter tweak.
   var_max_r <- reactive({
-    max_abs_spill_var[[input$spill_var]] * max(multiplier_d(), 1)
+    max_abs_spill_var[[input$spill_var]]
   })
   
-  # PERFORMANCE FIX: legend redraw split out from polygon redraw. It only
-  # needs to change when the variable or multiplier changes (domain
-  # changes), not on every sign/significance/threshold filter tweak.
   observe({
     var_max <- var_max_r()
     v <- input$spill_var
     pal <- colorNumeric("RdBu", domain = c(-var_max, var_max), reverse = TRUE)
     
-    leafletProxy("map") %>%
+    leafletProxy("map_spill") %>%
       clearControls() %>%
       addLegend(
         position = "bottomright",
@@ -389,7 +595,7 @@ server <- function(input, output, session) {
       reverse = TRUE
     )
     
-    proxy <- leafletProxy("map", data = dat)
+    proxy <- leafletProxy("map_spill", data = dat)
     proxy %>% clearShapes()
     
     if (nrow(dat) > 0) {
@@ -399,8 +605,7 @@ server <- function(input, output, session) {
           weight = 0.5,
           color = "white",
           fillOpacity = 0.8,
-          smoothFactor = 1.5,   # PERFORMANCE FIX: slightly coarser on-screen
-          # rendering (client-side only, data untouched)
+          smoothFactor = 1.5,
           label = ~municipality_name,
           popup = ~popup_html,
           highlightOptions = highlightOptions(
@@ -411,6 +616,177 @@ server <- function(input, output, session) {
         )
     }
   })
+  
+  ## ---------- TAB 3: what-if for a single municipality ---------------------
+  
+  # server-side population of the municipality menu (7900+ options:
+  # server=TRUE avoids shipping the whole list to the client)
+  observe({
+    updateSelectizeInput(session, "whatif_comune",
+                         choices = setNames(as.character(seq_len(n_obs)),
+                                            map_data_spill$municipality_name),
+                         server = TRUE)
+  })
+  
+  m_idx <- reactive({
+    val <- input$whatif_comune
+    if (is.null(val) || val == "") return(NA_integer_)
+    suppressWarnings(as.integer(val))
+  })
+  
+  observeEvent(input$map_whatif_shape_click, {
+    click <- input$map_whatif_shape_click
+    req(click$id)
+    updateSelectizeInput(session, "whatif_comune", selected = click$id)
+  })
+  
+  # Keep the slider centered on the TRUE current value of the selected
+  # variable for the selected municipality, ranging from 0 to twice
+  # that value, every time the municipality or the variable changes.
+  observe({
+    idx <- m_idx()
+    v <- input$whatif_var
+    req(!is.na(idx), v)
+    
+    cur <- map_data_spill[[paste0("raw_", v)]][idx]
+    # these are log(1+x) variables, so cur is always >= 0; guard the
+    # degenerate cur == 0 case so the slider doesn't collapse to a
+    # single point
+    upper <- if (is.finite(cur) && cur > 0) 2 * cur else 1
+    
+    updateSliderInput(session, "whatif_value",
+                      min = 0, max = upper, value = cur,
+                      step = upper / 100)
+  })
+  
+  whatif_value_d <- reactive(input$whatif_value) %>% debounce(200)
+  
+  whatif_result <- reactive({
+    idx <- m_idx()
+    if (is.na(idx)) {
+      # no municipality selected yet: show the unperturbed baseline map
+      idx_vec <- seq_len(n_obs)
+      return(data.frame(
+        idx = idx_vec,
+        municipality_id = map_data_spill$municipality_id,
+        municipality_name = map_data_spill$municipality_name,
+        baseline_stays = baseline_stays_hat,
+        new_stays = baseline_stays_hat,
+        delta_stays = 0,
+        pct_change = 0,
+        is_selected = FALSE,
+        is_neighbour = FALSE
+      ))
+    }
+    req(input$whatif_var)
+    whatif_predict(idx, input$whatif_var, whatif_value_d())
+  })
+  
+  output$map_whatif <- renderLeaflet({
+    leaflet(options = leafletOptions(preferCanvas = TRUE)) %>%
+      addTiles() %>%
+      setView(lng = 12.5, lat = 42.5, zoom = 6)
+  })
+  
+  observe({
+    res <- whatif_result()
+    
+    dat <- map_data_spill
+    dat$new_stays <- res$new_stays
+    dat$baseline_stays <- res$baseline_stays
+    dat$delta_stays <- res$delta_stays
+    dat$pct_change <- res$pct_change
+    dat$is_selected <- res$is_selected
+    dat$is_neighbour <- res$is_neighbour
+    
+    # color domain recomputed on the current values (so it doesn't
+    # saturate/clip if the scenario pushes a municipality beyond the
+    # baseline observed range)
+    pal <- colorNumeric("YlOrRd", domain = log1p(pmax(dat$new_stays, 0)))
+    
+    dat <- dat %>%
+      mutate(
+        border_color = case_when(
+          is_selected  ~ "black",
+          is_neighbour ~ "#1f78b4",
+          TRUE         ~ "white"
+        ),
+        border_weight = case_when(
+          is_selected  ~ 3,
+          is_neighbour ~ 2,
+          TRUE         ~ 0.3
+        ),
+        popup_html = paste0(
+          "<b>", municipality_name, "</b><br>",
+          "Predicted stays (baseline): ", format(round(baseline_stays), big.mark = ","), "<br>",
+          "Predicted stays (scenario): ", format(round(new_stays), big.mark = ","), "<br>",
+          "Change: ", ifelse(delta_stays >= 0, "+", ""), format(round(delta_stays), big.mark = ","),
+          " (", sprintf("%+.1f", pct_change), "%)"
+        )
+      )
+    
+    proxy <- leafletProxy("map_whatif", data = dat)
+    proxy %>% clearShapes() %>% clearControls()
+    
+    proxy %>%
+      addPolygons(
+        fillColor = ~pal(log1p(pmax(new_stays, 0))),
+        weight = ~border_weight,
+        color = ~border_color,
+        fillOpacity = 0.8,
+        smoothFactor = 1.5,
+        layerId = ~as.character(seq_len(nrow(dat))),
+        label = ~municipality_name,
+        popup = ~popup_html,
+        highlightOptions = highlightOptions(color = "black", weight = 2, bringToFront = TRUE)
+      ) %>%
+      addLegend(
+        position = "bottomright",
+        pal = pal,
+        values = log1p(pmax(dat$new_stays, 0)),
+        title = "Predicted overnight stays",
+        labFormat = labelFormat(big.mark = ",", digits = 0,
+                                transform = function(x) round(expm1(x))),
+        opacity = 0.8
+      )
+  })
+  
+  fmt_whatif_table <- function(rows) {
+    rows <- rows[, c("municipality_name", "baseline_stays", "new_stays", "delta_stays", "pct_change")]
+    rows$baseline_stays <- format(round(rows$baseline_stays), big.mark = ",")
+    rows$new_stays <- format(round(rows$new_stays), big.mark = ",")
+    rows$delta_stays <- paste0(ifelse(rows$delta_stays >= 0, "+", ""),
+                               format(round(rows$delta_stays), big.mark = ","))
+    rows$pct_change <- sprintf("%+.1f%%", rows$pct_change)
+    names(rows) <- c("Municipality", "Baseline", "Scenario", "Change", "Change %")
+    rows
+  }
+  
+  output$whatif_selected_table <- renderTable({
+    idx <- m_idx()
+    req(!is.na(idx))
+    res <- whatif_result()
+    fmt_whatif_table(res[res$idx == idx, ])
+  }, striped = TRUE)
+  
+  output$whatif_top_table <- renderTable({
+    idx <- m_idx()
+    req(!is.na(idx))
+    res <- whatif_result()
+    
+    # Rank across ALL municipalities except the selected one (which is
+    # already shown in its own table above), using PERCENT change
+    # rather than raw change: a large city and a tiny hamlet are on
+    # very different absolute scales, so ranking by raw delta_stays
+    # would just surface the biggest municipalities every time,
+    # regardless of how much the scenario actually moved them.
+    others <- res[res$idx != idx, ]
+    top10 <- others[order(-abs(others$pct_change)), ][seq_len(min(10, nrow(others))), ]
+    
+    out <- fmt_whatif_table(top10)
+    out$Neighbour <- ifelse(top10$is_neighbour, "Yes", "No")
+    out
+  }, striped = TRUE)
 }
 
 shinyApp(ui, server)
