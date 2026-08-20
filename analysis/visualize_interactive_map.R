@@ -4,40 +4,18 @@
 #
 # CHANGES IN THIS VERSION vs the previous one:
 #
-#   TAB 1 "Night stays"   - unchanged: observed overnight stays per
-#                            municipality, logarithmic color scale.
+#   TAB 1 "Night stays"   - Removed sidebar details table; all values
+#                            now appear exclusively in the map popup.
+#                          - Altitude zone now displays descriptive labels
+#                            (e.g., "Inland hill areas") instead of codes.
 #
 #   TAB 2 "Spillover"     - SIMPLIFIED sidebar: only the Durbin
 #                            variable selector and the spillover-sign
-#                            filter remain. The threshold slider, the
-#                            "significant only" checkbox and the
-#                            scenario multiplier have been removed.
-#                            The map now always shows theta*WX exactly
-#                            as estimated, for every municipality,
-#                            colored by sign/magnitude, optionally
-#                            filtered to positive/negative only.
+#                            filter remain.
 #
-#   TAB 3 "What-if"       - REWORKED. Instead of a 0-3 multiplier
-#                            applied to a *standardized* deviation
-#                            (which was hard to interpret), the
-#                            slider now shows the variable in its
-#                            natural (log, but UN-standardized) units,
-#                            centered on the true current value for
-#                            the selected municipality, and lets you
-#                            move it between 0 and twice that value.
-#                            The resulting change in predicted stays
-#                            is now computed and shown for ALL
-#                            municipalities in the network (not just
-#                            the direct neighbours of the selected
-#                            one), and the side table lists the 10
-#                            municipalities with the largest variation
-#                            — ranked by PERCENT change rather than
-#                            raw change, so that large and small
-#                            municipalities are compared on the same
-#                            (relative) scale instead of the ranking
-#                            being dominated by whichever municipality
-#                            happens to have the largest baseline
-#                            number of stays.
+#   TAB 3 "What-if"       - REWORKED: slider in natural units, shows
+#                            changes for all municipalities, ranks by
+#                            percent change.
 #
 # METHODOLOGICAL NOTE on the "What-if" tab:
 #   The model is a spatial Durbin model (SAR + Durbin):
@@ -49,11 +27,7 @@
 #     (b) an effect theta_v on EVERY neighbour j of m, because WX_j
 #         includes x_m (the WX*theta term)
 #     (c) both shocks then propagate through the whole network via
-#         the global operator (I - rho*W)^-1 (this is why the model
-#         is called a "global spillover" model: in theory the whole
-#         network moves a little, but the effect decays quickly with
-#         network distance and stays concentrated on the municipality
-#         itself and its closest neighbours).
+#         the global operator (I - rho*W)^-1.
 #   To avoid paying for an ~n x n factorization on every slider move,
 #   the LU factorization of (I - rho*W) is computed ONCE at startup
 #   (section 8); every slider move is then a cheap triangular solve.
@@ -106,6 +80,15 @@ if (length(name_col) > 0) {
 }
 
 ## 3. VARIABLE CONSTRUCTION ----------------------------------------------
+# Define altitude zone labels
+altitude_labels <- c(
+  "1" = "Inland mountain areas",
+  "2" = "Coastal mountain areas",
+  "3" = "Inland hill areas",
+  "4" = "Coastal hill areas",
+  "5" = "Plain areas"
+)
+
 map_data <- map_data %>%
   mutate(
     log_stays = log(1 + total_overnight_stays),
@@ -113,7 +96,7 @@ map_data <- map_data %>%
     log_non_hotel_beds = log(1 + total_non_hotel_beds),
     island_municipality = factor(island_municipality, levels = c(0, 1),
                                  labels = c("Mainland", "Island")),
-    altitude_zone = factor(altitude_zone),
+    altitude_zone = factor(altitude_zone, levels = 1:5, labels = altitude_labels),
     log_sea_coast_km = log(1 + sea_coast_km),
     log_lake_coast_km = log(1 + lake_coast_km),
     log_protected_area = log(1 + protected_areas_sqkm),
@@ -392,7 +375,7 @@ whatif_predict <- function(m_idx, v, target_raw) {
 
 ## 9. SHINY APP ------------------------------------------------------------
 ui <- fluidPage(
-  titlePanel("Tourism spillover explorer — RQ3"),
+  titlePanel("Italian Municipal Tourism Explorer"),
   tabsetPanel(
     id = "main_tabs",
     
@@ -400,10 +383,32 @@ ui <- fluidPage(
     tabPanel("Night stays",
              sidebarLayout(
                sidebarPanel(
-                 helpText("Observed overnight stays per municipality.",
-                          "Logarithmic color scale (the values shown in the",
-                          "legend are already converted back to number of",
-                          "overnight stays).")
+                 helpText("Observed overnight stays per municipality (logarithmic color scale)."),
+                 
+                 # ---- Variable descriptions (fixed) ----
+                 h4("Variable descriptions"),
+                 helpText(
+                   tags$ul(
+                     tags$li("Overnight stays – total tourist nights in accommodation"),
+                     tags$li("Hotel beds – capacity in hotels and tourist residences"),
+                     tags$li("Non‑hotel beds – capacity in campsites, B&Bs, etc."),
+                     tags$li("Coastline (km) – length of sea coast within municipality"),
+                     tags$li("Lake shoreline (km) – length of lake shore within municipality"),
+                     tags$li("Protected areas (km²) – area of nature reserves and protected zones"),
+                     tags$li("Museums – number of museums, galleries, monuments"),
+                     tags$li("Architectural features – churches, castles, palaces, etc."),
+                     tags$li("Sports facilities – sports centres, marinas, ski lifts, etc."),
+                     tags$li("Nature‑based activities – hiking routes, alpine huts, campsites, spas"),
+                     tags$li("Theme parks – number of amusement and water parks"),
+                     tags$li("Nightlife – bars, pubs, nightclubs"),
+                     tags$li("Public transport points – bus stops, railway stations"),
+                     tags$li("Airport distance (km) – straight‑line distance to nearest airport"),
+                     tags$li("UNESCO sites – number of World Heritage Sites"),
+                     tags$li("Island municipality – classified as island or mainland"),
+                     tags$li("Altitude zone – ISTAT altimetric classification (mountain/hill/plain, coastal/inland)")
+                   )
+                 ),
+                 helpText("Click on a municipality to view its detailed data in the popup.")
                ),
                mainPanel(
                  leafletOutput("map_stays", height = 700)
@@ -480,15 +485,64 @@ ui <- fluidPage(
 
 server <- function(input, output, session) {
   
-  ## ---------- TAB 1: night stays (static, computed once) -----------------
+  ## ---------- TAB 1: night stays (static) -----------------
   output$map_stays <- renderLeaflet({
+    # ---- Define display variables and labels ----
+    display_vars <- list(
+      total_overnight_stays      = "Overnight stays",
+      total_hotel_beds           = "Hotel beds",
+      total_non_hotel_beds       = "Non‑hotel beds",
+      sea_coast_km               = "Coastline (km)",
+      lake_coast_km              = "Lake shoreline (km)",
+      protected_areas_sqkm       = "Protected areas (km²)",
+      museums                    = "Museums",
+      architectural_features     = "Architectural features",
+      sports_facilities          = "Sports facilities",
+      nature_based               = "Nature‑based activities",
+      theme_parks                = "Theme parks",
+      nightlife                  = "Nightlife",
+      public_transport_points    = "Public transport points",
+      airport_straight_km        = "Airport distance (km)",
+      n_unesco_sites             = "UNESCO sites",
+      island_municipality        = "Island municipality",
+      altitude_zone              = "Altitude zone"
+    )
+    
     pal_obs <- colorNumeric("YlOrRd", domain = log1p(map_data_spill$total_overnight_stays))
     
-    dat <- map_data_spill %>%
-      mutate(popup_html = paste0(
-        "<b>", municipality_name, "</b><br>",
-        "Observed overnight stays: ", format(round(total_overnight_stays), big.mark = ",")
-      ))
+    # Build popup HTML for each row
+    dat <- map_data_spill
+    popup_list <- lapply(seq_len(nrow(dat)), function(i) {
+      html <- paste0("<b>", dat$municipality_name[i], "</b><br>")
+      for (v in names(display_vars)) {
+        label <- display_vars[[v]]
+        val <- dat[[v]][i]
+        formatted <- NA_character_
+        
+        if (is.factor(val)) {
+          formatted <- as.character(val)
+        } else if (is.numeric(val)) {
+          if (v %in% c("total_overnight_stays", "total_hotel_beds", "total_non_hotel_beds",
+                       "museums", "architectural_features", "sports_facilities",
+                       "nature_based", "theme_parks", "nightlife",
+                       "public_transport_points", "n_unesco_sites")) {
+            formatted <- format(round(val), big.mark = ",")
+          } else {
+            formatted <- sprintf("%.2f", val)
+          }
+        } else {
+          formatted <- as.character(val)
+        }
+        
+        if (v == "total_overnight_stays") {
+          html <- paste0(html, "<b>", label, ": ", formatted, "</b><br>")
+        } else {
+          html <- paste0(html, label, ": ", formatted, "<br>")
+        }
+      }
+      sub("<br>$", "", html)
+    })
+    dat$popup_html <- unlist(popup_list)
     
     leaflet(dat, options = leafletOptions(preferCanvas = TRUE)) %>%
       addTiles() %>%
@@ -499,6 +553,7 @@ server <- function(input, output, session) {
         color = "white",
         fillOpacity = 0.8,
         smoothFactor = 1.5,
+        layerId = ~as.character(seq_len(nrow(dat))),
         label = ~municipality_name,
         popup = ~popup_html,
         highlightOptions = highlightOptions(color = "black", weight = 2, bringToFront = TRUE)
@@ -516,12 +571,6 @@ server <- function(input, output, session) {
   
   ## ---------- TAB 2: spillover explorer (simplified) ----------------------
   output$map_spill <- renderLeaflet({
-    leaflet(map_data_spill, options = leafletOptions(preferCanvas = TRUE)) %>%
-      addTiles() %>%
-      setView(lng = 12.5, lat = 42.5, zoom = 6)
-  })
-  
-  var_data <- reactive({
     req(input$spill_var)
     v <- input$spill_var
     spill_name <- paste0("spill_", v)
@@ -533,15 +582,21 @@ server <- function(input, output, session) {
     dat$selected_var_value <- dat[[v]]
     
     p_ind_val <- p_indirect_map[[v]]
-    p_ind_val <- if (is.null(p_ind_val) || length(p_ind_val) != 1) NA_real_ else as.numeric(p_ind_val)
-    
     spill_type_val <- spill_type_map[[v]]
-    spill_type_val <- if (is.null(spill_type_val) || length(spill_type_val) != 1) "not tested" else as.character(spill_type_val)
-    
     dat$p_indirect <- p_ind_val
     dat$spill_type <- spill_type_val
     
-    dat %>%
+    # Apply sign filter
+    if (input$sign_filter == "Complementary (positive)") {
+      dat <- dat %>% filter(spill_value > 0)
+    } else if (input$sign_filter == "Competitive (negative)") {
+      dat <- dat %>% filter(spill_value < 0)
+    }
+    
+    var_max <- max_abs_spill_var[[v]]
+    pal <- colorNumeric("RdBu", domain = c(-var_max, var_max), reverse = TRUE)
+    
+    dat <- dat %>%
       mutate(popup_html = paste0(
         "<b>", municipality_name, "</b><br>",
         "Overnight stays: ", round(total_overnight_stays), "<br>",
@@ -551,31 +606,20 @@ server <- function(input, output, session) {
         "Indirect p-value: ", ifelse(is.na(p_indirect), "NA", sprintf("%.3f", p_indirect)), "<br>",
         "Spillover type: ", spill_type
       ))
-  })
-  
-  filtered <- reactive({
-    dat <- var_data()
     
-    if (input$sign_filter == "Complementary (positive)") {
-      dat <- dat %>% filter(spill_value > 0)
-    } else if (input$sign_filter == "Competitive (negative)") {
-      dat <- dat %>% filter(spill_value < 0)
-    }
-    
-    dat
-  })
-  
-  var_max_r <- reactive({
-    max_abs_spill_var[[input$spill_var]]
-  })
-  
-  observe({
-    var_max <- var_max_r()
-    v <- input$spill_var
-    pal <- colorNumeric("RdBu", domain = c(-var_max, var_max), reverse = TRUE)
-    
-    leafletProxy("map_spill") %>%
-      clearControls() %>%
+    leaflet(dat, options = leafletOptions(preferCanvas = TRUE)) %>%
+      addTiles() %>%
+      setView(lng = 12.5, lat = 42.5, zoom = 6) %>%
+      addPolygons(
+        fillColor = ~pal(spill_value),
+        weight = 0.5,
+        color = "white",
+        fillOpacity = 0.8,
+        smoothFactor = 1.5,
+        label = ~municipality_name,
+        popup = ~popup_html,
+        highlightOptions = highlightOptions(color = "black", weight = 2, bringToFront = TRUE)
+      ) %>%
       addLegend(
         position = "bottomright",
         pal = pal,
@@ -583,38 +627,6 @@ server <- function(input, output, session) {
         title = paste0("Spillover effect<br>(", v, ")"),
         opacity = 0.8
       )
-  })
-  
-  observe({
-    dat <- filtered()
-    var_max <- var_max_r()
-    
-    pal <- colorNumeric(
-      palette = "RdBu",
-      domain = c(-var_max, var_max),
-      reverse = TRUE
-    )
-    
-    proxy <- leafletProxy("map_spill", data = dat)
-    proxy %>% clearShapes()
-    
-    if (nrow(dat) > 0) {
-      proxy %>%
-        addPolygons(
-          fillColor = ~pal(spill_value),
-          weight = 0.5,
-          color = "white",
-          fillOpacity = 0.8,
-          smoothFactor = 1.5,
-          label = ~municipality_name,
-          popup = ~popup_html,
-          highlightOptions = highlightOptions(
-            color = "black",
-            weight = 2,
-            bringToFront = TRUE
-          )
-        )
-    }
   })
   
   ## ---------- TAB 3: what-if for a single municipality ---------------------
@@ -782,7 +794,7 @@ server <- function(input, output, session) {
     # regardless of how much the scenario actually moved them.
     others <- res[res$idx != idx, ]
     top10 <- others[order(-abs(others$pct_change)), ][seq_len(min(10, nrow(others))), ]
-    
+    # 
     out <- fmt_whatif_table(top10)
     out$Neighbour <- ifelse(top10$is_neighbour, "Yes", "No")
     out
