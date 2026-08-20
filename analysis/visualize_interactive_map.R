@@ -1,36 +1,49 @@
 # ============================================================
-# Interactive spillover map for RQ3 — v3 (English, revised)
+# Interactive spillover map for RQ3 — v5 (English, revised)
 # Shiny + Leaflet
 #
-# CHANGES IN THIS VERSION vs the previous one:
+# CHANGES IN THIS VERSION vs v4:
 #
-#   TAB 1 "Night stays"   - Removed sidebar details table; all values
-#                            now appear exclusively in the map popup.
-#                          - Altitude zone now displays descriptive labels
-#                            (e.g., "Inland hill areas") instead of codes.
+#   TAB 2 "Spillover"     - The variable selector now ONLY offers the
+#                            5 variables that actually carry a spatial
+#                            lag (theta*WX) term in the fitted SDM:
+#                            Hotel beds, Non-hotel beds, Sports
+#                            facilities, Nature-based activities,
+#                            Public transport points.
+#                          - The other Durbin variables from the model
+#                            (Coastline, Lake shoreline, Protected
+#                            areas) are still COMPUTED internally
+#                            (needed by the model/impacts machinery)
+#                            but no longer exposed in the dropdown.
+#                          - Museums, Architectural features, Theme
+#                            parks and Nightlife are NOT added to the
+#                            selector: they have no theta*WX term in
+#                            this model (they were never part of
+#                            durbin_formula), so there is no spatial
+#                            spillover map to draw for them without
+#                            changing the SDM itself. Adding them was
+#                            explicitly decided against to keep the
+#                            model, and therefore every spillover
+#                            value, identical to the canonical RQ3
+#                            script.
+#                          - Popup on this tab no longer shows
+#                            "Indirect p-value" / "Spillover type".
+#                          - Popup now shows REAL, human-readable
+#                            values instead of standardized (z-score)
+#                            ones: the municipality's own raw count/
+#                            length for the selected variable, its
+#                            neighbours' raw average for that same
+#                            variable, and the estimated spillover
+#                            expressed as a % change in overnight
+#                            stays (exp(theta*WX) - 1), instead of a
+#                            raw log-scale coefficient number.
+#                          - NONE of this touches SDM, durbin_formula,
+#                            listw_queen, impacts_table, or the
+#                            theta*WX values used for the map colors:
+#                            this is a display-only change, exactly
+#                            like the label change in v4.
 #
-#   TAB 2 "Spillover"     - SIMPLIFIED sidebar: only the Durbin
-#                            variable selector and the spillover-sign
-#                            filter remain.
-#
-#   TAB 3 "What-if"       - REWORKED: slider in natural units, shows
-#                            changes for all municipalities, ranks by
-#                            percent change.
-#
-# METHODOLOGICAL NOTE on the "What-if" tab:
-#   The model is a spatial Durbin model (SAR + Durbin):
-#     log_stays = rho * W * log_stays + X*beta + WX*theta + eps
-#   In reduced form:
-#     log_stays_hat = (I - rho*W)^-1 * (X*beta + WX*theta)
-#   Changing variable v in municipality m produces:
-#     (a) a direct effect beta_v on row m (the X*beta term)
-#     (b) an effect theta_v on EVERY neighbour j of m, because WX_j
-#         includes x_m (the WX*theta term)
-#     (c) both shocks then propagate through the whole network via
-#         the global operator (I - rho*W)^-1.
-#   To avoid paying for an ~n x n factorization on every slider move,
-#   the LU factorization of (I - rho*W) is computed ONCE at startup
-#   (section 8); every slider move is then a cheap triangular solve.
+# (All other sections are unchanged from v4/v3.)
 # ============================================================
 
 library(sf)
@@ -211,7 +224,69 @@ impacts_table <- impacts_to_table(impSDM, "SDM") %>%
   ))
 
 ## 7. CREATE SPILLOVER VARIABLES AND PER-VARIABLE COLOR DOMAINS -----------
+# spill_vars = every variable with a theta*WX term in the fitted SDM
+# (i.e. all.vars(durbin_formula)). This set MUST stay exactly as in
+# the canonical RQ3 script - it drives the model-derived quantities
+# below and nothing here changes the SDM.
 spill_vars <- all.vars(durbin_formula)
+
+# selector_vars = the SUBSET of spill_vars actually exposed in the
+# Tab 2 dropdown. Restricting the UI choices to a subset of an
+# already-computed set is purely cosmetic (fewer menu items) and has
+# zero effect on the model or on any spillover value. Variables that
+# are NOT in spill_vars (Museums, Architectural features, Theme parks,
+# Nightlife) are intentionally NOT added here: they have no theta*WX
+# term in this model, so there is nothing spatial to map for them
+# without changing durbin_formula itself.
+selector_vars <- c("log_hotel_beds", "log_non_hotel_beds",
+                   "log_sports", "log_nature", "log_transport_pts")
+
+# Friendly label + short description for each spillover (Durbin)
+# variable, matching the wording used for the same underlying concept
+# in the Tab 1 "Variable descriptions" block. Used ONLY for display
+# (selector choices, legend title, popup text, sidebar description
+# list) on Tab 2 - every internal computation (color domain, sign
+# filter, impacts lookup, spill_/wx_ column names) still keys off the
+# raw variable name (e.g. "log_hotel_beds"), so nothing about the
+# statistics changes.
+spill_var_meta <- list(
+  log_hotel_beds     = list(label = "Hotel beds",
+                            desc = "Capacity in hotels and tourist residences"),
+  log_non_hotel_beds = list(label = "Non\u2011hotel beds",
+                            desc = "Capacity in campsites, B&Bs, etc."),
+  log_sea_coast_km   = list(label = "Coastline (km)",
+                            desc = "Length of sea coast within municipality"),
+  log_lake_coast_km  = list(label = "Lake shoreline (km)",
+                            desc = "Length of lake shore within municipality"),
+  log_protected_area = list(label = "Protected areas (km\u00b2)",
+                            desc = "Area of nature reserves and protected zones"),
+  log_sports         = list(label = "Sports facilities",
+                            desc = "Sports centres, marinas, ski lifts, etc."),
+  log_nature         = list(label = "Nature\u2011based activities",
+                            desc = "Hiking routes, alpine huts, campsites, spas"),
+  log_transport_pts  = list(label = "Public transport points",
+                            desc = "Bus stops, railway stations")
+)
+
+# Maps each selector variable to the ORIGINAL (un-logged,
+# un-standardized) column in map_data, so the popup can show real,
+# human-readable numbers ("1,240 beds") instead of a log/z-score.
+spill_var_raw_col <- list(
+  log_hotel_beds     = "total_hotel_beds",
+  log_non_hotel_beds = "total_non_hotel_beds",
+  log_sports         = "sports_facilities",
+  log_nature         = "nature_based",
+  log_transport_pts  = "public_transport_points"
+)
+
+# Named-vector form used directly as `choices` in selectInput():
+# names() are what the user sees, values are the raw variable names
+# passed around the server internally. Built from selector_vars, i.e.
+# only the 5 variables shown in the dropdown.
+spill_var_choices <- setNames(
+  selector_vars,
+  vapply(selector_vars, function(v) spill_var_meta[[v]]$label, character(1))
+)
 
 map_data_spill <- map_data
 
@@ -223,6 +298,18 @@ for (v in spill_vars) {
   
   map_data_spill[[wx_name]] <- lag.listw(listw_queen, map_data_spill[[v]], zero.policy = TRUE)
   map_data_spill[[spill_name]] <- theta * map_data_spill[[wx_name]]
+}
+
+# Real-units neighbourhood average, for popup display only. Because
+# listw_queen uses row-standardized weights (style = "W", weights sum
+# to 1 per row), lag.listw() on the RAW column gives exactly the
+# average of that raw value across a municipality's neighbours - a
+# genuine "neighbours have on average N beds/stops/etc." number, with
+# no bearing on the model (which still uses the standardized wx_*
+# columns above for every actual calculation).
+for (v in selector_vars) {
+  raw_col <- spill_var_raw_col[[v]]
+  map_data_spill[[paste0("rawwx_", v)]] <- lag.listw(listw_queen, map_data_spill[[raw_col]], zero.policy = TRUE)
 }
 
 # Attach the pre-scaling (raw log-scale) values too, for tab 3. Row
@@ -416,25 +503,40 @@ ui <- fluidPage(
              )
     ),
     
-    ## TAB 2 — spillover explorer (simplified sidebar) --------------------
+    ## TAB 2 — spillover explorer (5 variables with a real WX term) -------
     tabPanel("Spillover",
              sidebarLayout(
                sidebarPanel(
                  selectInput("spill_var",
                              "Spillover variable",
-                             choices = spill_vars,
+                             choices = spill_var_choices,
                              selected = "log_nature"),
                  
-                 radioButtons("sign_filter",
-                              "Spillover sign",
-                              choices = c("All", "Complementary (positive)", "Competitive (negative)"),
-                              selected = "All"),
+                 # Overall (network-wide) indirect/total effect for the
+                 # selected variable, taken directly from impacts_table
+                 # (unchanged, identical to the canonical RQ3 script) -
+                 # shown here so it can be checked against the printed
+                 # impacts_table / sdm_direct_indirect_impacts.png values.
+                 uiOutput("spill_overall_effect"),
                  
-                 helpText("Map of the estimated spillover effect theta * WX",
-                          "for the selected variable, as estimated by the model",
-                          "(no scenario multiplier applied). Use the sign filter",
-                          "to isolate complementary (positive) or competitive",
-                          "(negative) spillovers.")
+                 helpText("Estimated spillover effect of the selected resource on",
+                          "overnight stays in neighbouring municipalities. Click a",
+                          "municipality to see its own value, its neighbours'",
+                          "average, and the resulting effect as a % change in",
+                          "overnight stays (positive = complementary, negative =",
+                          "competitive)."),
+                 
+                 # ---- Variable descriptions (only the variables shown ----
+                 # ---- in the selector above) ------------------------------
+                 h4("Variable descriptions"),
+                 helpText(
+                   do.call(tags$ul,
+                           lapply(selector_vars, function(v) {
+                             meta <- spill_var_meta[[v]]
+                             tags$li(paste0(meta$label, " – ", meta$desc))
+                           })
+                   )
+                 )
                ),
                mainPanel(
                  leafletOutput("map_spill", height = 700)
@@ -569,29 +671,46 @@ server <- function(input, output, session) {
       )
   })
   
-  ## ---------- TAB 2: spillover explorer (simplified) ----------------------
+  ## ---------- TAB 2: overall (network-wide) effect, for cross-checking ----
+  # Pulled straight from impacts_table (identical to the canonical RQ3
+  # script) - direct/indirect/total in log(1 + overnight stays) units,
+  # same numbers as printed impacts_table and sdm_direct_indirect_impacts.png.
+  output$spill_overall_effect <- renderUI({
+    req(input$spill_var)
+    row <- impacts_table[impacts_table$variable == input$spill_var, ]
+    req(nrow(row) == 1)
+    
+    tags$div(
+      style = "background-color:#f5f5f5; padding:8px; border-radius:4px; margin-bottom:10px; font-size:13px;",
+      tags$b("Overall effect (SDM impacts table)"), tags$br(),
+      sprintf("Direct: %.4f", row$direct), tags$br(),
+      sprintf("Indirect: %.4f (p = %s)", row$indirect,
+              ifelse(is.na(row$p_indirect), "NA", sprintf("%.3f", row$p_indirect))), tags$br(),
+      sprintf("Total: %.4f", row$total), tags$br(),
+      paste0("Type: ", row$spillover_type)
+    )
+  })
+  
+  ## ---------- TAB 2: spillover explorer (5 variables, human-readable) -----
   output$map_spill <- renderLeaflet({
     req(input$spill_var)
     v <- input$spill_var
+    v_label <- spill_var_meta[[v]]$label
     spill_name <- paste0("spill_", v)
-    wx_name <- paste0("wx_", v)
+    rawwx_name <- paste0("rawwx_", v)
+    raw_col <- spill_var_raw_col[[v]]
     
     dat <- map_data_spill
-    dat$spill_value <- dat[[spill_name]]
-    dat$wx_value <- dat[[wx_name]]
-    dat$selected_var_value <- dat[[v]]
+    dat$spill_value <- dat[[spill_name]]           # theta*WX, standardized scale - unchanged model output, drives the map color
+    dat$real_value <- dat[[raw_col]]                # municipality's own value, real units
+    dat$real_neighbour_avg <- dat[[rawwx_name]]     # neighbours' average value, real units
     
-    p_ind_val <- p_indirect_map[[v]]
-    spill_type_val <- spill_type_map[[v]]
-    dat$p_indirect <- p_ind_val
-    dat$spill_type <- spill_type_val
-    
-    # Apply sign filter
-    if (input$sign_filter == "Complementary (positive)") {
-      dat <- dat %>% filter(spill_value > 0)
-    } else if (input$sign_filter == "Competitive (negative)") {
-      dat <- dat %>% filter(spill_value < 0)
-    }
+    # Estimated spillover re-expressed as an approximate % change in
+    # overnight stays: exp(theta*WX) - 1. This is the standard
+    # interpretation of a coefficient on a log-outcome model and is
+    # purely a re-expression of spill_value - it does not change the
+    # underlying model value used for the map color below.
+    dat$pct_effect <- 100 * (exp(dat$spill_value) - 1)
     
     var_max <- max_abs_spill_var[[v]]
     pal <- colorNumeric("RdBu", domain = c(-var_max, var_max), reverse = TRUE)
@@ -599,12 +718,10 @@ server <- function(input, output, session) {
     dat <- dat %>%
       mutate(popup_html = paste0(
         "<b>", municipality_name, "</b><br>",
-        "Overnight stays: ", round(total_overnight_stays), "<br>",
-        "Selected variable (standardized): ", round(selected_var_value, 3), "<br>",
-        "Neighbours' variable (WX): ", round(wx_value, 3), "<br>",
-        "Spillover effect (theta*WX): ", round(spill_value, 3), "<br>",
-        "Indirect p-value: ", ifelse(is.na(p_indirect), "NA", sprintf("%.3f", p_indirect)), "<br>",
-        "Spillover type: ", spill_type
+        "Overnight stays: ", format(round(total_overnight_stays), big.mark = ","), "<br>",
+        v_label, ": ", format(round(real_value, 1), big.mark = ","), "<br>",
+        "Neighbours' average ", v_label, ": ", format(round(real_neighbour_avg, 1), big.mark = ","), "<br>",
+        "Estimated spillover effect: ", sprintf("%+.1f%%", pct_effect), " in overnight stays"
       ))
     
     leaflet(dat, options = leafletOptions(preferCanvas = TRUE)) %>%
@@ -624,7 +741,7 @@ server <- function(input, output, session) {
         position = "bottomright",
         pal = pal,
         values = c(-var_max, var_max),
-        title = paste0("Spillover effect<br>(", v, ")"),
+        title = paste0("Spillover effect<br>(", v_label, ")"),
         opacity = 0.8
       )
   })
