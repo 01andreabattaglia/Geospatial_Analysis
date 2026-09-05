@@ -489,9 +489,12 @@ ui <- fluidPage(
                           "stays for EVERY municipality in the network, not just",
                           "the immediate neighbours (blue border = direct",
                           "neighbour of the selected municipality; black border",
-                          "= selected municipality). Click any municipality on",
-                          "the map to select it and inspect its own resulting",
-                          "variation, or search for it above."),
+                          "= selected municipality). Use the \"Municipality\"",
+                          "search box above to choose which municipality to",
+                          "simulate \u2014 clicking directly on the map does not",
+                          "change the selection, but you can click any",
+                          "municipality on the map to see its own before/after",
+                          "prediction in a popup."),
                  
                  h4("Variable descriptions"),
                  helpText(
@@ -686,6 +689,10 @@ server <- function(input, output, session) {
   })
   
   ## ---------- TAB 3: what-if for a single municipality ---------------------
+  ## Municipality selection is driven ONLY by the "whatif_comune" selectize
+  ## filter in the sidebar. Clicking on the map does NOT change the
+  ## selection (no map-click observer is registered for this tab); clicking
+  ## a municipality on the map only opens its own before/after popup.
   
   whatif_comune_choices <- setNames(as.character(seq_len(n_obs)),
                                     map_data_spill$municipality_name)
@@ -700,15 +707,6 @@ server <- function(input, output, session) {
     val <- input$whatif_comune
     if (is.null(val) || val == "") return(NA_integer_)
     suppressWarnings(as.integer(val))
-  })
-  
-  observeEvent(input$map_whatif_shape_click, {
-    click <- input$map_whatif_shape_click
-    req(click$id)
-    updateSelectizeInput(session, "whatif_comune",
-                         choices = whatif_comune_choices,
-                         selected = click$id,
-                         server = TRUE)
   })
   
   observe({
@@ -802,11 +800,12 @@ server <- function(input, output, session) {
         color = ~border_color,
         fillOpacity = 0.8,
         smoothFactor = 1.5,
-        layerId = ~as.character(seq_len(nrow(dat))),
         label = ~municipality_name,
         popup = ~popup_html,
-        group = "muni",
-        highlightOptions = highlightOptions(color = "black", weight = 2, bringToFront = TRUE)
+        group = "muni"
+        # NOTE: removed options = pathOptions(interactive = FALSE) here.
+        # That flag was blocking clicks/popups on every municipality in
+        # the What-if map. Popups now work exactly like in the other tabs.
       ) %>%
       addPolylines(
         data = regioni_boundary,
@@ -859,4 +858,4 @@ server <- function(input, output, session) {
   }, striped = TRUE)
 }
 
-# shinyApp(ui, server)
+shinyApp(ui, server)

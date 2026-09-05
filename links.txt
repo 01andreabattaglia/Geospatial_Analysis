@@ -1,9 +1,0 @@
-Descrizione caratteristiche comuni: https://situas.istat.it/web/#/territorio/body?id=73&dateFrom=2024-12-31
-UNESCO: https://data.unesco.org/explore/dataset/whc001/export/
-ISTAT accomodations: https://esploradati.istat.it/databrowser/#/it/dw/categories/IT1,Z0700SER,1.0/SER_TOURISM
-ISTAT popolazione 2024: https://demo.istat.it/app/?l=it&a=2024&i=POS
-
-PAPER
-https://d1wqtxts1xzle7.cloudfront.net/24795239/destination_competitiveness-libre.pdf?1390868357=&response-content-disposition=inline%3B+filename%3DDestination_competitiveness_determinants.pdf&Expires=1783458224&Signature=Z8Cwz87cr0fhzO8YmozgLGgy6lMoRRuO2iNGX2oxH3CoV4ZzFHho0w0f9Hh2WLuiBJfNFwhWYTgd8MlvZVc5-xHVOpvepGyNkuvExMykW-4eEjW2TmATmMoDSrnqS~7Vuy~q4DAI~43Vjb0uxq3mCKyCT7V1bihHZKWP7cxxsAL~4OIibREUuZ~ItAoKwfk5gc5QWB0~7pkCUtNlsqVRXXGjbI5f-FzBZpAMKnZzJ-5fQM6sKzv5jEXa1US7sBS2gYgddRsDHEUEA2RixOquNJ6GMR~u8JnYnTfryLR7TGgTGWndWAOJHQkLWuY-zEyA9B13Oti-sYngjmHuWV0dSw__&Key-Pair-Id=APKAJLOHF5GGSLRBV4ZA
-
-R -e "shiny::runApp('analysis/visualize_interactive_map.R')"
