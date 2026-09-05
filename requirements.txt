@@ -1,10 +1,9 @@
+dbfread
 geopandas
-contextily
-scikit-learn
-mapclassify
-folium
-flask
-pandas
+jupyter
+matplotlib
 openpyxl
+pandas
+shapely
 flask-cors
 

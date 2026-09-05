@@ -1,12 +1,3 @@
-## ============================================================
-## RQ3 -- Do tourism resources generate spatial spillovers on
-##        neighbouring municipalities, and are they complementary
-##        (+) or competitive (-)?
-## Output: 2 plots only
-##   1) sdm_direct_indirect_impacts.png
-##   2) spillover_map_nature.png
-## ============================================================
-
 library(sf)
 library(spdep)
 library(spatialreg)
@@ -69,7 +60,6 @@ model_formula <- log_stays ~ log_hotel_beds + log_non_hotel_beds +
   log_theme_parks + log_nightlife + log_transport_pts +
   log_airport_dist + has_unesco
 
-## Durbin formula: identical to RQ2 (no log_airport_dist)
 durbin_formula <- ~ log_hotel_beds + log_non_hotel_beds +
   log_sea_coast_km + log_lake_coast_km +
   log_protected_area + log_sports + log_nature +
@@ -129,7 +119,6 @@ impacts_table <- impacts_to_table(impSDM, "SDM") %>%
     TRUE                  ~ "not significant"
   ))
 
-## Print minimal output: impacts table (answers RQ3)
 print(impacts_table)
 
 ## ============================================================
@@ -180,11 +169,3 @@ map_spillover <- function(varname, title_lab) {
 ## PLOT 2 -- nature-based resources spillover
 p_spill_nature <- map_spillover("log_nature", "nature-based resource endowment")
 ggsave("analysis/RQ-3/spillover_map_nature.png", p_spill_nature, width = 8, height = 8, dpi = 300)
-
-## ============================================================
-## RQ3 ANSWER (derived from impacts_table)
-## H3 (spillovers exist) is supported if any indirect effect is
-##    significant (p_indirect < 0.10).
-## H4 (heterogeneous sign) is supported if impacts_table shows
-##    both "complementary" and "competitive" entries.
-## ============================================================
