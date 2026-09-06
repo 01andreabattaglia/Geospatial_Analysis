@@ -1,6 +1,6 @@
 # OpenStreetMap Data Extraction — Overpass API Queries
 
-This document lists all the Overpass API (Overpass QL) queries used to extract the data stored in `data/input/OpenStreetMap`. Each query targets a specific dataset (coastlines, lakes, protected areas, points of interest, sports facilities, nature-based locations, amusement parks, nightlife venues, and local transport stops) across Italy.
+This document lists all the Overpass API (Overpass QL) queries used to extract the data stored in `data/input/OpenStreetMap`. Each query targets a specific dataset (coastlines, lakes, protected areas, points of interest, sports facilities, nature-based locations, amusement parks, nightlife venues, local transport stops, and airports) across Italy.
 
 ---
 
@@ -362,6 +362,26 @@ out center;
 
 ---
 
+## 11. Airports / Aerodromes
+
+**Purpose:** Extract all aerodromes (airports, airfields, and military/civil air bases) across Italy, including IATA/ICAO codes, aerodrome type, and operator, used to build the national airports dataset.
+
+```overpassql
+[out:csv(::id, ::type, "name", "iata", "icao", "aerodrome:type", "operator", ::lat, ::lon)][timeout:300];
+area["ISO3166-1"="IT"][admin_level=2]->.italia;
+
+(
+  node["aeroway"="aerodrome"](area.italia);
+  way["aeroway"="aerodrome"](area.italia);
+  relation["aeroway"="aerodrome"](area.italia);
+);
+out center;
+```
+
+**Note:** The `::type` field distinguishes `node`, `way`, and `relation` elements (larger/mapped airport boundaries are typically `way` or `relation`, while smaller airfields may be `node`). The `aerodrome:type` tag (e.g. `public`, `military/public`, `international`) and `operator` tag are not present on every feature, so some rows in the resulting CSV will have empty values for those columns.
+
+---
+
 ## Summary Table
 
 | # | Dataset | Output Format | Scope |
@@ -376,5 +396,6 @@ out center;
 | 8 | Amusement/theme parks | CSV | Italy |
 | 9 | Nightlife venues | CSV | Italy |
 | 10 | Local transport systems | CSV | Italy (North / Centre / South) |
+| 11 | Airports / aerodromes | CSV | Italy |
 
 All queries were executed against the [Overpass API](https://overpass-api.de/) using Overpass QL syntax, targeting OpenStreetMap data restricted to the Italian national boundary (`ISO3166-1=IT`, `admin_level=2`), or to individual Italian regions (`admin_level=4`) for the transport dataset.
