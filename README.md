@@ -10,6 +10,7 @@ exploring the data, the estimated spillovers, and "what-if" scenarios.
 
 ---
 
+
 ## Quick start — run the interactive map
 
 These are the minimum commands to get the Shiny app (`analysis/visualize_interactive_map.R`)
@@ -20,6 +21,16 @@ running. They assume the repository already ships the merged dataset at
 
 You need **Python 3.10+** (only for the data-prep pipeline, not required to
 just view the map) and **R 4.2+** installed.
+
+> **R must be reachable from the terminal.** Installing R does not
+> automatically add it to your system `PATH`, especially on Windows — so
+> `Rscript` may work inside RStudio but not in PowerShell/cmd/bash. If any
+> `Rscript` command below fails with *"'Rscript' is not recognized"* (Windows)
+> or *"command not found"* (Linux/macOS), see
+> [Troubleshooting: Rscript not found](#troubleshooting-rscript-not-found)
+> at the end of this section — or simplest fix, just open the project in
+> **RStudio** and run the same commands from its built-in Terminal or
+> Console instead of an external one.
 
 ### Linux / macOS
 
@@ -37,7 +48,7 @@ pip install -r requirements.txt
 Rscript install_r_packages.R
 
 # 4. Launch the interactive map
-Rscript -e "shiny::runApp('analysis/visualize_interactive_map.R')"
+Rscript -e "shiny::runApp('analysis/visualize_interactive_map.R', launch.browser = TRUE)"
 ```
 
 ### Windows (PowerShell)
@@ -56,7 +67,7 @@ pip install -r requirements.txt
 Rscript install_r_packages.R
 
 # 4. Launch the interactive map
-Rscript -e "shiny::runApp('analysis/visualize_interactive_map.R')"
+Rscript -e "shiny::runApp('analysis/visualize_interactive_map.R', launch.browser = TRUE)"
 ```
 
 The app opens in your default browser (or prints a local URL such as
@@ -64,6 +75,28 @@ The app opens in your default browser (or prints a local URL such as
 interaction re-runs the spatial model over the full national dataset, so give
 each click a few seconds before clicking again (see
 `docs/Interactive map.md` for the full usage guide).
+
+#### Troubleshooting: `Rscript` not found
+
+If R is installed but your terminal doesn't recognize `Rscript`, R's `bin`
+folder simply isn't on your system `PATH`. Easiest fix — **run everything
+from RStudio instead**: open the project in RStudio and use its built-in
+**Terminal** tab (or the **Console**, prefixing commands with `system()`) to
+run the same commands above; RStudio always knows where R lives regardless
+of the system `PATH`.
+
+If you'd rather fix it for your regular terminal (Windows):
+1. Open R or RStudio and run `R.home("bin")` to get the exact install path,
+   e.g. `C:/Program Files/R/R-4.3.3/bin/x64`.
+2. In a **new** PowerShell window, add it to your user `PATH` permanently:
+```powershell
+   [System.Environment]::SetEnvironmentVariable(
+       "Path",
+       $env:Path + ";C:\Program Files\R\R-4.3.3\bin\x64",
+       "User"
+   )
+```
+3. Close and reopen PowerShell, then confirm with `Rscript --version`.
 
 **System-library note for `sf`/`geopandas`:** both `sf` (R) and `geopandas`
 (Python) depend on GDAL/GEOS/PROJ.

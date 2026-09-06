@@ -1,6 +1,6 @@
 # Run once with:  Rscript install_r_packages.R
 pkgs <- c(
-  "sf", "spdep", "spatialreg", "Matrix",
+  "sf", "here", "spdep", "spatialreg", "Matrix",
   "dplyr", "readr", "tidyr", "stringr",
   "ggplot2", "car", "patchwork",
   "shiny", "leaflet",
