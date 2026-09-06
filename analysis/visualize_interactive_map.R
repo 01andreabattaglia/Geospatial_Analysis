@@ -10,12 +10,12 @@ library(shiny)
 library(leaflet)
 
 ## 1. DATA IMPORT AND MERGE ---------------------------------------------
-df <- read_csv("../data/tourism_final_dataset.csv",
+df <- read_csv("data/tourism_final_dataset.csv",
                col_types = cols(province_code = col_character(),
                                 municipality_id = col_character())) %>%
   mutate(municipality_id = str_pad(municipality_id, 6, pad = "0"))
 
-comuni_sf <- st_read("../data/input/ISTAT/Com01012024_g/Com01012024_g_WGS84.shp", quiet = TRUE) %>%
+comuni_sf <- st_read("data/input/ISTAT/Com01012024_g/Com01012024_g_WGS84.shp", quiet = TRUE) %>%
   mutate(municipality_id = str_pad(as.character(PRO_COM), 6, pad = "0"))
 
 map_data <- comuni_sf %>%
