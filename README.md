@@ -8,7 +8,7 @@ one municipality-level dataset) with **R** spatial regression analyses (OLS,
 SAR, SEM, SDM, SDEM, SLX) and an interactive **Shiny/leaflet** web app for
 exploring the data, the estimated spillovers, and "what-if" scenarios.
 
-![alt text](image.png)
+![alt text](analysis\image.png)
 
 ---
 
