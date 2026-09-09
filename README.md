@@ -19,7 +19,8 @@ These are the minimum commands to get the Shiny app (`analysis/visualize_interac
 running. They assume the repository already ships the merged dataset at
 `data/tourism_final_dataset.csv` and the ISTAT shapefile under
 `data/input/ISTAT/`. If those files are not present, build them first with the
-[full pipeline](#running-the-full-pipeline) below.
+[full pipeline](#running-the-full-pipeline) below — some raw inputs must be
+downloaded manually, see [`docs/Data Sources.md`](docs/Data%20Sources.md).
 
 You need **Python 3.10+** (only for the data-prep pipeline, not required to
 just view the map) and **R 4.2+** installed.
@@ -82,7 +83,7 @@ The app opens in your default browser (or prints a local URL such as
 `http://127.0.0.1:xxxx` to the console). Loading and every subsequent
 interaction re-runs the spatial model over the full national dataset, so give
 each click a few seconds before clicking again (see
-`docs/Interactive map.md` for the full usage guide).
+[`docs/Interactive map.md`](docs/Interactive%20map.md) for the full usage guide).
 
 #### Troubleshooting: `Rscript` not found
 
@@ -147,8 +148,10 @@ Order matters: `istat_data.py`, `openstreetmap_data.py` and
 data into the final `data/tourism_final_dataset.csv` used by every R script.
 All raw inputs are expected under `data/input/...` exactly as referenced
 inside the scripts (ISTAT shapefile/DBF/Excel/CSV, OSM GeoJSON/TSV extracts,
-UNESCO CSV) — see `docs/OpenStreetMap Overpass queries.md` for how the OSM
-extracts were produced.
+UNESCO CSV) — see [`docs/OpenStreetMap Overpass queries.md`](docs/OpenStreetMap%20Overpass%20queries.md) for how the OSM
+extracts were produced, and [`docs/Data Sources.md`](docs/Data%20Sources.md)
+for where to download the ISTAT/UNESCO files that aren't fetched by
+`src/download_data.py`.
 
 ### 2. R — statistical analyses
 
