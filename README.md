@@ -46,10 +46,13 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# 3. Install the R packages used by the app and analyses
+# 3. Download the ISTAT municipal boundaries shapefile
+python src/download_data.py
+
+# 4. Install the R packages used by the app and analyses
 Rscript install_r_packages.R
 
-# 4. Launch the interactive map
+# 5. Launch the interactive map
 Rscript -e "shiny::runApp('analysis/visualize_interactive_map.R', launch.browser = TRUE)"
 ```
 
@@ -65,10 +68,13 @@ python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 
-# 3. Install the R packages used by the app and analyses
+# 3. Download the ISTAT municipal boundaries shapefile
+python src/download_data.py
+
+# 4. Install the R packages used by the app and analyses
 Rscript install_r_packages.R
 
-# 4. Launch the interactive map
+# 5. Launch the interactive map
 Rscript -e "shiny::runApp('analysis/visualize_interactive_map.R', launch.browser = TRUE)"
 ```
 
