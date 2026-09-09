@@ -26,8 +26,9 @@ ISTAT_ZIP_URL = (
 # Cartella dentro lo zip ISTAT che ci interessa
 SOURCE_FOLDER_NAME = "Com01012024_g"
 
-# Radice del progetto = cartella in cui si trova questo script
-PROJECT_ROOT = Path(__file__).resolve().parent
+# Radice del progetto = cartella padre di src/ (dove si trova questo script).
+# Se sposti lo script altrove, aggiorna questa riga di conseguenza.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CACHE_DIR = PROJECT_ROOT / "data" / "cache"
 INPUT_DIR = PROJECT_ROOT / "data" / "input" / "ISTAT"
 
